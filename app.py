@@ -4,9 +4,11 @@ import json
 import os
 import uuid
 import threading
+import re
 from pathlib import Path
 from flask import Flask, request, jsonify, send_from_directory, render_template
 from anthropic import Anthropic
+import yt_dlp
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024 * 1024  # 2GB
@@ -19,8 +21,9 @@ for d in [UPLOAD_DIR, CLIPS_DIR, FRAMES_DIR]:
 
 client = Anthropic()
 
-# In-memory job store
+# In-memory job stores
 jobs: dict[str, dict] = {}
+dl_jobs: dict[str, dict] = {}
 
 VIBES = {
     "gaming": "Find the most exciting gaming moments: clutch plays, funny deaths, rage moments, epic wins, and hype reactions that would go viral on YouTube/Twitch clips.",
@@ -32,6 +35,10 @@ VIBES = {
 CLIP_PADDING = 2
 FRAME_INTERVAL = 2
 
+
+# ---------------------------------------------------------------------------
+# Video processing helpers
+# ---------------------------------------------------------------------------
 
 def extract_frames(video_path: str, interval: int, job_id: str) -> list[dict]:
     frame_dir = FRAMES_DIR / job_id
@@ -184,7 +191,6 @@ def process_video(job_id: str, video_path: str, vibe: str, fmt: str):
                 }
             )
 
-        # Clean up frames
         import shutil
         shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
 
@@ -196,6 +202,77 @@ def process_video(job_id: str, video_path: str, vibe: str, fmt: str):
         update_job(job_id, status="error", progress=0, message=str(e))
 
 
+# ---------------------------------------------------------------------------
+# yt-dlp download helpers
+# ---------------------------------------------------------------------------
+
+def update_dl(job_id: str, **kwargs):
+    if job_id in dl_jobs:
+        dl_jobs[job_id].update(kwargs)
+
+
+def run_download(job_id: str, url: str):
+    downloaded_path: list[str] = []
+
+    def progress_hook(d):
+        if d["status"] == "downloading":
+            raw = d.get("_percent_str", "0%").strip()
+            # strip ANSI codes
+            pct_str = re.sub(r"\x1b\[[0-9;]*m", "", raw).replace("%", "").strip()
+            try:
+                pct = min(95, int(float(pct_str)))
+            except ValueError:
+                pct = dl_jobs[job_id].get("progress", 0)
+            speed = re.sub(r"\x1b\[[0-9;]*m", "", d.get("_speed_str", "")).strip()
+            eta = re.sub(r"\x1b\[[0-9;]*m", "", d.get("_eta_str", "")).strip()
+            msg = f"Downloading… {pct}%"
+            if speed:
+                msg += f"  {speed}"
+            if eta and eta != "Unknown":
+                msg += f"  ETA {eta}"
+            update_dl(job_id, progress=pct, message=msg)
+        elif d["status"] == "finished":
+            update_dl(job_id, progress=96, message="Download complete, converting to mp4…")
+            downloaded_path.append(d["filename"])
+
+    # Output template: use video title, save into uploads/
+    outtmpl = str(UPLOAD_DIR / "%(title).60s.%(ext)s")
+
+    ydl_opts = {
+        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "outtmpl": outtmpl,
+        "progress_hooks": [progress_hook],
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            final_path = ydl.prepare_filename(info)
+            # yt-dlp may change extension after merge
+            if not Path(final_path).exists():
+                final_path = str(Path(final_path).with_suffix(".mp4"))
+
+        filename = Path(final_path).name
+        update_dl(
+            job_id,
+            status="done",
+            progress=100,
+            message=f"Ready: {filename}",
+            filename=filename,
+            filepath=final_path,
+        )
+    except Exception as e:
+        update_dl(job_id, status="error", progress=0, message=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -203,31 +280,32 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
-    if "video" not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
-
-    video_file = request.files["video"]
     vibe = request.form.get("vibe", "viral")
     fmt = request.form.get("format", "vertical")
 
-    if not video_file.filename:
-        return jsonify({"error": "No file selected"}), 400
+    # Accept either a file upload or a path to an already-saved upload
+    existing_path = request.form.get("video_path", "").strip()
+    if existing_path:
+        # Security: must resolve inside UPLOAD_DIR
+        candidate = Path(existing_path).resolve()
+        if not str(candidate).startswith(str(UPLOAD_DIR.resolve())):
+            return jsonify({"error": "Invalid video path"}), 400
+        if not candidate.exists():
+            return jsonify({"error": "File not found"}), 400
+        video_path = str(candidate)
+    elif "video" in request.files and request.files["video"].filename:
+        video_file = request.files["video"]
+        job_id_tmp = str(uuid.uuid4())
+        ext = Path(video_file.filename).suffix or ".mp4"
+        video_path = str(UPLOAD_DIR / f"{job_id_tmp}{ext}")
+        video_file.save(video_path)
+    else:
+        return jsonify({"error": "No video provided"}), 400
 
     job_id = str(uuid.uuid4())
-    ext = Path(video_file.filename).suffix or ".mp4"
-    video_path = str(UPLOAD_DIR / f"{job_id}{ext}")
-    video_file.save(video_path)
-
-    jobs[job_id] = {
-        "status": "queued",
-        "progress": 0,
-        "message": "Job queued...",
-        "clips": [],
-    }
-
+    jobs[job_id] = {"status": "queued", "progress": 0, "message": "Job queued...", "clips": []}
     thread = threading.Thread(target=process_video, args=(job_id, video_path, vibe, fmt), daemon=True)
     thread.start()
-
     return jsonify({"job_id": job_id})
 
 
@@ -243,6 +321,42 @@ def status(job_id):
 def download_clip(job_id, filename):
     clip_dir = CLIPS_DIR / job_id
     return send_from_directory(str(clip_dir), filename, as_attachment=True)
+
+
+@app.route("/download", methods=["POST"])
+def start_download():
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "No URL provided"}), 400
+
+    job_id = str(uuid.uuid4())
+    dl_jobs[job_id] = {"status": "downloading", "progress": 0, "message": "Starting download…", "filename": None}
+    thread = threading.Thread(target=run_download, args=(job_id, url), daemon=True)
+    thread.start()
+    return jsonify({"job_id": job_id})
+
+
+@app.route("/download-status/<job_id>")
+def download_status(job_id):
+    job = dl_jobs.get(job_id)
+    if not job:
+        return jsonify({"error": "Job not found"}), 404
+    return jsonify(job)
+
+
+@app.route("/uploads")
+def list_uploads():
+    video_exts = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+    files = []
+    for f in sorted(UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
+        if f.suffix.lower() in video_exts:
+            files.append({
+                "name": f.name,
+                "path": str(f),
+                "size_mb": round(f.stat().st_size / 1024 / 1024, 1),
+            })
+    return jsonify(files)
 
 
 if __name__ == "__main__":

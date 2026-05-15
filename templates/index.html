@@ -28,30 +28,63 @@
       -webkit-text-fill-color: transparent;
     }
 
-    .subtitle {
-      color: #666;
-      font-size: 0.9rem;
-      margin-bottom: 40px;
-    }
+    .subtitle { color: #666; font-size: 0.9rem; margin-bottom: 32px; }
 
     .card {
       background: #16161a;
       border: 1px solid #2a2a35;
       border-radius: 16px;
-      padding: 32px;
       width: 100%;
       max-width: 640px;
+      overflow: hidden;
     }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      border-bottom: 1px solid #2a2a35;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 14px 16px;
+      background: none;
+      border: none;
+      color: #555;
+      font-size: 0.9rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: color 0.15s, background 0.15s;
+      position: relative;
+    }
+
+    .tab-btn:hover { color: #999; background: rgba(255,255,255,0.02); }
+
+    .tab-btn.active {
+      color: #a78bfa;
+    }
+
+    .tab-btn.active::after {
+      content: '';
+      position: absolute;
+      bottom: -1px;
+      left: 0; right: 0;
+      height: 2px;
+      background: linear-gradient(90deg, #7c3aed, #3b82f6);
+    }
+
+    /* Tab panels */
+    .tab-panel { display: none; padding: 28px 28px 24px; }
+    .tab-panel.active { display: block; }
 
     /* Drop zone */
     #drop-zone {
       border: 2px dashed #2a2a35;
       border-radius: 12px;
-      padding: 48px 24px;
+      padding: 40px 24px;
       text-align: center;
       cursor: pointer;
       transition: all 0.2s;
-      position: relative;
     }
 
     #drop-zone:hover, #drop-zone.drag-over {
@@ -59,22 +92,78 @@
       background: rgba(124, 58, 237, 0.05);
     }
 
-    #drop-zone .icon { font-size: 2.5rem; margin-bottom: 12px; }
-
-    #drop-zone p { color: #888; font-size: 0.9rem; }
+    #drop-zone .icon { font-size: 2.2rem; margin-bottom: 10px; }
+    #drop-zone p { color: #888; font-size: 0.88rem; }
     #drop-zone strong { color: #c4b5fd; }
-
     #file-input { display: none; }
 
     #file-name {
-      margin-top: 10px;
-      font-size: 0.85rem;
+      margin-top: 8px;
+      font-size: 0.82rem;
       color: #a78bfa;
-      min-height: 18px;
+      min-height: 16px;
     }
 
+    /* Divider */
+    .or-divider {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 18px 0;
+      color: #333;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .or-divider::before, .or-divider::after {
+      content: '';
+      flex: 1;
+      height: 1px;
+      background: #2a2a35;
+    }
+
+    /* Downloaded files selector */
+    #dl-file-row {
+      display: none;
+      align-items: center;
+      gap: 10px;
+    }
+
+    #dl-file-row.visible { display: flex; }
+
+    #dl-file-select {
+      flex: 1;
+      background: #0d0d0f;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      color: #e8e8ed;
+      padding: 10px 12px;
+      font-size: 0.88rem;
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      cursor: pointer;
+    }
+
+    #dl-file-select:focus { outline: none; border-color: #7c3aed; }
+
+    .use-file-btn {
+      padding: 10px 16px;
+      background: #1e1e28;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      color: #a78bfa;
+      font-size: 0.85rem;
+      font-weight: 500;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: background 0.15s;
+    }
+    .use-file-btn:hover { background: #2a2a35; }
+
     /* Options */
-    .options { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 24px; }
+    .options { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 20px; }
 
     label.field-label {
       display: block;
@@ -99,12 +188,11 @@
       background-position: right 12px center;
       cursor: pointer;
     }
-
     select:focus { outline: none; border-color: #7c3aed; }
 
-    /* Button */
-    button#process-btn {
-      margin-top: 24px;
+    /* Primary button */
+    .primary-btn {
+      margin-top: 20px;
       width: 100%;
       padding: 14px;
       background: linear-gradient(135deg, #7c3aed, #3b82f6);
@@ -116,12 +204,11 @@
       cursor: pointer;
       transition: opacity 0.2s, transform 0.1s;
     }
-
-    button#process-btn:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
-    button#process-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+    .primary-btn:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+    .primary-btn:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
 
     /* Progress */
-    #progress-section { margin-top: 28px; display: none; }
+    .progress-section { margin-top: 24px; display: none; }
 
     .progress-label {
       display: flex;
@@ -154,9 +241,9 @@
     }
 
     /* Error */
-    #error-box {
-      margin-top: 20px;
-      padding: 14px;
+    .error-box {
+      margin-top: 16px;
+      padding: 12px 14px;
       background: rgba(239, 68, 68, 0.1);
       border: 1px solid rgba(239, 68, 68, 0.3);
       border-radius: 8px;
@@ -165,13 +252,25 @@
       display: none;
     }
 
-    /* Results */
-    #results-section { margin-top: 28px; display: none; }
+    /* Success banner */
+    .success-box {
+      margin-top: 16px;
+      padding: 12px 14px;
+      background: rgba(52, 211, 153, 0.08);
+      border: 1px solid rgba(52, 211, 153, 0.25);
+      border-radius: 8px;
+      color: #6ee7b7;
+      font-size: 0.85rem;
+      display: none;
+    }
 
-    #results-section h2 {
+    /* Results */
+    .results-section { margin-top: 24px; display: none; }
+
+    .results-section h2 {
       font-size: 1rem;
       font-weight: 600;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
       color: #a78bfa;
     }
 
@@ -179,8 +278,8 @@
       background: #0d0d0f;
       border: 1px solid #2a2a35;
       border-radius: 10px;
-      padding: 14px 16px;
-      margin-bottom: 10px;
+      padding: 12px 14px;
+      margin-bottom: 8px;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -190,7 +289,7 @@
     .clip-info { flex: 1; min-width: 0; }
 
     .clip-title {
-      font-size: 0.9rem;
+      font-size: 0.88rem;
       font-weight: 600;
       white-space: nowrap;
       overflow: hidden;
@@ -199,7 +298,7 @@
     }
 
     .clip-reason {
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       color: #666;
       white-space: nowrap;
       overflow: hidden;
@@ -207,151 +306,288 @@
     }
 
     .clip-time {
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       color: #7c3aed;
       font-variant-numeric: tabular-nums;
       white-space: nowrap;
     }
 
-    .download-btn {
-      padding: 7px 14px;
+    .dl-btn {
+      padding: 6px 13px;
       background: #1e1e28;
       border: 1px solid #2a2a35;
       border-radius: 7px;
       color: #a78bfa;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       font-weight: 500;
       text-decoration: none;
       white-space: nowrap;
       transition: background 0.15s;
     }
+    .dl-btn:hover { background: #2a2a35; }
 
-    .download-btn:hover { background: #2a2a35; }
+    /* Download tab — URL input */
+    .url-row { display: flex; gap: 10px; }
+
+    #url-input {
+      flex: 1;
+      background: #0d0d0f;
+      border: 1px solid #2a2a35;
+      border-radius: 8px;
+      color: #e8e8ed;
+      padding: 11px 14px;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    #url-input:focus { border-color: #7c3aed; }
+    #url-input::placeholder { color: #444; }
+
+    #dl-btn {
+      padding: 11px 20px;
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: opacity 0.2s;
+    }
+    #dl-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    #dl-btn:hover:not(:disabled) { opacity: 0.88; }
+
+    .platforms {
+      margin-top: 10px;
+      font-size: 0.76rem;
+      color: #444;
+    }
+
+    .go-clip-btn {
+      display: inline-block;
+      margin-top: 10px;
+      padding: 8px 16px;
+      background: linear-gradient(135deg, #7c3aed, #3b82f6);
+      border: none;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      text-decoration: none;
+      transition: opacity 0.15s;
+    }
+    .go-clip-btn:hover { opacity: 0.88; }
 
     .badge-env {
-      margin-top: 20px;
+      margin-top: 18px;
       text-align: center;
       font-size: 0.72rem;
-      color: #333;
+      color: #2a2a35;
     }
   </style>
 </head>
 <body>
   <h1>AI Video Clipper</h1>
-  <p class="subtitle">Drop a video &rarr; Claude finds the best moments &rarr; Download your clips</p>
+  <p class="subtitle">Download a video &rarr; Claude finds the best moments &rarr; Export your clips</p>
 
   <div class="card">
-    <!-- Drop zone -->
-    <div id="drop-zone" onclick="document.getElementById('file-input').click()">
-      <div class="icon">🎬</div>
-      <p><strong>Drag &amp; drop</strong> your video here</p>
-      <p>or click to browse &mdash; MP4, MOV, MKV, AVI</p>
-      <input type="file" id="file-input" accept="video/*" />
-      <div id="file-name"></div>
+    <!-- Tab nav -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="clip">✂️&nbsp; Clip Video</button>
+      <button class="tab-btn" data-tab="download">⬇️&nbsp; Download Video</button>
     </div>
 
-    <!-- Options -->
-    <div class="options">
-      <div>
-        <label class="field-label" for="vibe-select">Vibe</label>
-        <select id="vibe-select">
-          <option value="gaming">🎮 Gaming Highlights</option>
-          <option value="funny">😂 Funny Moments</option>
-          <option value="emotional">❤️ Emotional</option>
-          <option value="viral" selected>🔥 Viral / TikTok</option>
-        </select>
+    <!-- ===== CLIP TAB ===== -->
+    <div class="tab-panel active" id="tab-clip">
+      <!-- Drop zone -->
+      <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        <div class="icon">🎬</div>
+        <p><strong>Drag &amp; drop</strong> your video here</p>
+        <p>or click to browse &mdash; MP4, MOV, MKV, AVI</p>
+        <input type="file" id="file-input" accept="video/*" />
+        <div id="file-name"></div>
       </div>
-      <div>
-        <label class="field-label" for="format-select">Output Format</label>
-        <select id="format-select">
-          <option value="vertical" selected>📱 Vertical 9:16</option>
-          <option value="horizontal">🖥️ Horizontal 16:9</option>
-        </select>
+
+      <!-- Downloaded files selector (shown when uploads exist) -->
+      <div class="or-divider" id="or-divider" style="display:none">or use a downloaded file</div>
+      <div id="dl-file-row">
+        <select id="dl-file-select"><option value="">— select a downloaded video —</option></select>
+        <button class="use-file-btn" onclick="useDownloadedFile()">Use this file</button>
+      </div>
+
+      <!-- Options -->
+      <div class="options">
+        <div>
+          <label class="field-label" for="vibe-select">Vibe</label>
+          <select id="vibe-select">
+            <option value="gaming">🎮 Gaming Highlights</option>
+            <option value="funny">😂 Funny Moments</option>
+            <option value="emotional">❤️ Emotional</option>
+            <option value="viral" selected>🔥 Viral / TikTok</option>
+          </select>
+        </div>
+        <div>
+          <label class="field-label" for="format-select">Output Format</label>
+          <select id="format-select">
+            <option value="vertical" selected>📱 Vertical 9:16</option>
+            <option value="horizontal">🖥️ Horizontal 16:9</option>
+          </select>
+        </div>
+      </div>
+
+      <button class="primary-btn" id="process-btn" disabled>Select a video first</button>
+
+      <div class="progress-section" id="clip-progress">
+        <div class="progress-label">
+          <span id="clip-step">Processing…</span>
+          <span id="clip-pct">0%</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="clip-fill"></div>
+        </div>
+        <div class="status-msg" id="clip-msg"></div>
+      </div>
+
+      <div class="error-box" id="clip-error"></div>
+
+      <div class="results-section" id="clip-results">
+        <h2 id="clip-results-heading"></h2>
+        <div id="clips-list"></div>
       </div>
     </div>
 
-    <!-- Process button -->
-    <button id="process-btn" disabled>Select a video first</button>
-
-    <!-- Progress -->
-    <div id="progress-section">
-      <div class="progress-label">
-        <span id="progress-step">Processing...</span>
-        <span id="progress-pct">0%</span>
+    <!-- ===== DOWNLOAD TAB ===== -->
+    <div class="tab-panel" id="tab-download">
+      <label class="field-label" style="margin-bottom:10px">Video URL</label>
+      <div class="url-row">
+        <input type="url" id="url-input" placeholder="https://youtube.com/watch?v=…" />
+        <button id="dl-btn">Download</button>
       </div>
-      <div class="progress-bar-track">
-        <div class="progress-bar-fill" id="progress-fill"></div>
+      <div class="platforms">Supports YouTube, TikTok, Twitter/X, Instagram, Vimeo, and 1000+ sites via yt-dlp</div>
+
+      <div class="progress-section" id="dl-progress">
+        <div class="progress-label">
+          <span id="dl-step">Downloading…</span>
+          <span id="dl-pct">0%</span>
+        </div>
+        <div class="progress-bar-track">
+          <div class="progress-bar-fill" id="dl-fill"></div>
+        </div>
+        <div class="status-msg" id="dl-msg"></div>
       </div>
-      <div class="status-msg" id="status-msg"></div>
-    </div>
 
-    <!-- Error -->
-    <div id="error-box"></div>
-
-    <!-- Results -->
-    <div id="results-section">
-      <h2 id="results-heading"></h2>
-      <div id="clips-list"></div>
+      <div class="error-box" id="dl-error"></div>
+      <div class="success-box" id="dl-success"></div>
     </div>
   </div>
 
-  <div class="badge-env">Powered by Claude + FFmpeg &bull; Runs locally</div>
+  <div class="badge-env">Powered by Claude + FFmpeg + yt-dlp &bull; Runs locally</div>
 
   <script>
-    const dropZone = document.getElementById('drop-zone');
-    const fileInput = document.getElementById('file-input');
-    const fileNameEl = document.getElementById('file-name');
-    const processBtn = document.getElementById('process-btn');
-    const progressSection = document.getElementById('progress-section');
-    const progressFill = document.getElementById('progress-fill');
-    const progressPct = document.getElementById('progress-pct');
-    const progressStep = document.getElementById('progress-step');
-    const statusMsg = document.getElementById('status-msg');
-    const errorBox = document.getElementById('error-box');
-    const resultsSection = document.getElementById('results-section');
-    const clipsList = document.getElementById('clips-list');
-    const resultsHeading = document.getElementById('results-heading');
+    // ── Tab switching ──────────────────────────────────────────────────────
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      });
+    });
 
+    function switchToClipTab() {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      document.querySelector('[data-tab="clip"]').classList.add('active');
+      document.getElementById('tab-clip').classList.add('active');
+    }
+
+    // ── Clip tab state ─────────────────────────────────────────────────────
     let selectedFile = null;
-    let pollTimer = null;
+    let selectedPath = null;  // path of a previously downloaded file
+    let clipPollTimer = null;
 
-    // Drag and drop
+    const dropZone    = document.getElementById('drop-zone');
+    const fileInput   = document.getElementById('file-input');
+    const fileNameEl  = document.getElementById('file-name');
+    const processBtn  = document.getElementById('process-btn');
+    const orDivider   = document.getElementById('or-divider');
+    const dlFileRow   = document.getElementById('dl-file-row');
+    const dlFileSelect = document.getElementById('dl-file-select');
+
+    // Drop zone
     dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag-over'); });
     dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag-over'));
     dropZone.addEventListener('drop', e => {
       e.preventDefault();
       dropZone.classList.remove('drag-over');
       const file = e.dataTransfer.files[0];
-      if (file && file.type.startsWith('video/')) setFile(file);
+      if (file && file.type.startsWith('video/')) setUploadFile(file);
     });
+    fileInput.addEventListener('change', () => { if (fileInput.files[0]) setUploadFile(fileInput.files[0]); });
 
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files[0]) setFile(fileInput.files[0]);
-    });
-
-    function setFile(file) {
+    function setUploadFile(file) {
       selectedFile = file;
+      selectedPath = null;
       fileNameEl.textContent = `✓ ${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
       processBtn.disabled = false;
       processBtn.textContent = 'Find Best Moments →';
     }
 
-    function fmt(s) { return s < 60 ? `${s}s` : `${Math.floor(s/60)}m${s%60}s`; }
+    function useDownloadedFile() {
+      const sel = dlFileSelect;
+      if (!sel.value) return;
+      const opt = sel.options[sel.selectedIndex];
+      selectedPath = sel.value;
+      selectedFile = null;
+      fileNameEl.textContent = `✓ ${opt.textContent.split(' (')[0]} (from downloads)`;
+      processBtn.disabled = false;
+      processBtn.textContent = 'Find Best Moments →';
+    }
 
+    // Populate the downloaded files dropdown
+    async function refreshUploads(autoSelectPath) {
+      try {
+        const res = await fetch('/uploads');
+        const files = await res.json();
+        dlFileSelect.innerHTML = '<option value="">— select a downloaded video —</option>';
+        files.forEach(f => {
+          const opt = document.createElement('option');
+          opt.value = f.path;
+          opt.textContent = `${f.name} (${f.size_mb} MB)`;
+          dlFileSelect.appendChild(opt);
+        });
+        if (files.length > 0) {
+          orDivider.style.display = '';
+          dlFileRow.classList.add('visible');
+          if (autoSelectPath) {
+            dlFileSelect.value = autoSelectPath;
+          }
+        }
+      } catch (_) {}
+    }
+
+    refreshUploads(null);
+
+    // Clip processing
     processBtn.addEventListener('click', async () => {
-      if (!selectedFile) return;
+      if (!selectedFile && !selectedPath) return;
 
-      // Reset UI
-      errorBox.style.display = 'none';
-      resultsSection.style.display = 'none';
-      clipsList.innerHTML = '';
-      progressSection.style.display = 'block';
+      document.getElementById('clip-error').style.display = 'none';
+      document.getElementById('clip-results').style.display = 'none';
+      document.getElementById('clips-list').innerHTML = '';
+      document.getElementById('clip-progress').style.display = 'block';
       processBtn.disabled = true;
-      processBtn.textContent = 'Processing...';
-      setProgress(5, 'Uploading video...');
+      processBtn.textContent = 'Processing…';
+      setClipProgress(5, 'Preparing…');
 
       const form = new FormData();
-      form.append('video', selectedFile);
+      if (selectedFile) {
+        form.append('video', selectedFile);
+      } else {
+        form.append('video_path', selectedPath);
+      }
       form.append('vibe', document.getElementById('vibe-select').value);
       form.append('format', document.getElementById('format-select').value);
 
@@ -359,57 +595,58 @@
       try {
         const res = await fetch('/process', { method: 'POST', body: form });
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Upload failed');
+        if (!res.ok) throw new Error(data.error || 'Request failed');
         jobId = data.job_id;
       } catch (err) {
-        showError(err.message);
+        showClipError(err.message);
         return;
       }
 
-      pollTimer = setInterval(() => poll(jobId), 1500);
+      clipPollTimer = setInterval(() => pollClip(jobId), 1500);
     });
 
-    async function poll(jobId) {
+    async function pollClip(jobId) {
       try {
         const res = await fetch(`/status/${jobId}`);
         const job = await res.json();
-
-        setProgress(job.progress || 0, job.message || '');
-
+        setClipProgress(job.progress || 0, job.message || '');
         if (job.status === 'done') {
-          clearInterval(pollTimer);
-          showResults(job.clips);
+          clearInterval(clipPollTimer);
+          showClipResults(job.clips);
           processBtn.disabled = false;
           processBtn.textContent = 'Find Best Moments →';
         } else if (job.status === 'error') {
-          clearInterval(pollTimer);
-          showError(job.message);
+          clearInterval(clipPollTimer);
+          showClipError(job.message);
           processBtn.disabled = false;
           processBtn.textContent = 'Find Best Moments →';
         }
-      } catch (e) {
-        // network hiccup — keep polling
-      }
+      } catch (_) {}
     }
 
-    function setProgress(pct, msg) {
-      progressFill.style.width = pct + '%';
-      progressPct.textContent = pct + '%';
-      progressStep.textContent = pct < 100 ? 'Processing...' : 'Done!';
-      statusMsg.textContent = msg;
+    function setClipProgress(pct, msg) {
+      document.getElementById('clip-fill').style.width = pct + '%';
+      document.getElementById('clip-pct').textContent = pct + '%';
+      document.getElementById('clip-step').textContent = pct < 100 ? 'Processing…' : 'Done!';
+      document.getElementById('clip-msg').textContent = msg;
     }
 
-    function showError(msg) {
-      progressSection.style.display = 'none';
-      errorBox.textContent = '⚠️ ' + msg;
-      errorBox.style.display = 'block';
+    function showClipError(msg) {
+      document.getElementById('clip-progress').style.display = 'none';
+      const el = document.getElementById('clip-error');
+      el.textContent = '⚠️ ' + msg;
+      el.style.display = 'block';
     }
 
-    function showResults(clips) {
-      resultsSection.style.display = 'block';
-      resultsHeading.textContent = `✂️ ${clips.length} clip${clips.length !== 1 ? 's' : ''} ready to download`;
-      clipsList.innerHTML = '';
-      clips.forEach((clip, i) => {
+    function fmtTime(s) { return s < 60 ? `${s}s` : `${Math.floor(s/60)}m${s%60}s`; }
+
+    function showClipResults(clips) {
+      document.getElementById('clip-results').style.display = 'block';
+      document.getElementById('clip-results-heading').textContent =
+        `✂️ ${clips.length} clip${clips.length !== 1 ? 's' : ''} ready to download`;
+      const list = document.getElementById('clips-list');
+      list.innerHTML = '';
+      clips.forEach(clip => {
         const div = document.createElement('div');
         div.className = 'clip-card';
         div.innerHTML = `
@@ -417,11 +654,98 @@
             <div class="clip-title">${clip.title.replace(/_/g, ' ')}</div>
             <div class="clip-reason">${clip.reason}</div>
           </div>
-          <span class="clip-time">${fmt(clip.start)} → ${fmt(clip.end)}</span>
-          <a class="download-btn" href="${clip.download_url}" download>Download</a>
+          <span class="clip-time">${fmtTime(clip.start)} → ${fmtTime(clip.end)}</span>
+          <a class="dl-btn" href="${clip.download_url}" download>Download</a>
         `;
-        clipsList.appendChild(div);
+        list.appendChild(div);
       });
+    }
+
+    // ── Download tab ───────────────────────────────────────────────────────
+    let dlPollTimer = null;
+
+    document.getElementById('dl-btn').addEventListener('click', startDownload);
+    document.getElementById('url-input').addEventListener('keydown', e => {
+      if (e.key === 'Enter') startDownload();
+    });
+
+    async function startDownload() {
+      const url = document.getElementById('url-input').value.trim();
+      if (!url) return;
+
+      const dlBtn = document.getElementById('dl-btn');
+      const dlProgress = document.getElementById('dl-progress');
+      const dlError = document.getElementById('dl-error');
+      const dlSuccess = document.getElementById('dl-success');
+
+      dlError.style.display = 'none';
+      dlSuccess.style.display = 'none';
+      dlProgress.style.display = 'block';
+      dlBtn.disabled = true;
+      setDlProgress(2, 'Starting download…');
+
+      let jobId;
+      try {
+        const res = await fetch('/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Request failed');
+        jobId = data.job_id;
+      } catch (err) {
+        showDlError(err.message);
+        dlBtn.disabled = false;
+        return;
+      }
+
+      dlPollTimer = setInterval(() => pollDl(jobId), 1000);
+    }
+
+    async function pollDl(jobId) {
+      try {
+        const res = await fetch(`/download-status/${jobId}`);
+        const job = await res.json();
+        setDlProgress(job.progress || 0, job.message || '');
+
+        if (job.status === 'done') {
+          clearInterval(dlPollTimer);
+          document.getElementById('dl-btn').disabled = false;
+          showDlSuccess(job.filename, job.filepath);
+          // Refresh uploads list and auto-select this file in the clip tab
+          await refreshUploads(job.filepath);
+        } else if (job.status === 'error') {
+          clearInterval(dlPollTimer);
+          showDlError(job.message);
+          document.getElementById('dl-btn').disabled = false;
+        }
+      } catch (_) {}
+    }
+
+    function setDlProgress(pct, msg) {
+      document.getElementById('dl-fill').style.width = pct + '%';
+      document.getElementById('dl-pct').textContent = pct + '%';
+      document.getElementById('dl-step').textContent = pct < 100 ? 'Downloading…' : 'Done!';
+      document.getElementById('dl-msg').textContent = msg;
+    }
+
+    function showDlError(msg) {
+      document.getElementById('dl-progress').style.display = 'none';
+      const el = document.getElementById('dl-error');
+      el.textContent = '⚠️ ' + msg;
+      el.style.display = 'block';
+    }
+
+    function showDlSuccess(filename, filepath) {
+      const el = document.getElementById('dl-success');
+      el.innerHTML = `
+        ✓ Downloaded: <strong>${filename}</strong><br>
+        <button class="go-clip-btn" onclick="switchToClipTab()">
+          Clip this video →
+        </button>
+      `;
+      el.style.display = 'block';
     }
   </script>
 </body>
