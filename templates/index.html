@@ -292,8 +292,7 @@ button.retrim-btn:hover{background:var(--border2)}
 
       <div id="or-dl-row" style="display:none"><div class="or-row">or use a downloaded file</div></div>
       <div class="dl-select-row" id="dl-select-row">
-        <select id="dl-file-select"><option value="">— select a downloaded video —</option></select>
-        <button class="btn-ghost" onclick="useDownloaded()">Use</button>
+        <select id="dl-file-select" onchange="useDownloaded()"><option value="">— select a downloaded video —</option></select>
       </div>
 
       <!-- Batch queue -->
@@ -523,7 +522,11 @@ async function startProcessFromUrl(url) {
   } catch(e) { showClipError(e.message); return; }
 
   const data = await res.json();
-  if (!res.ok) { showClipError(data.error || 'Failed'); return; }
+  if (!res.ok) {
+    showClipError(data.error || 'Failed');
+    processBtn.disabled = false; processBtn.textContent = 'Find Best Moments →';
+    return;
+  }
 
   activeJobId = data.job_id;
   processBtn.disabled = true;
@@ -535,9 +538,15 @@ async function startProcessFromUrl(url) {
 //  PROCESS BUTTON
 // ═══════════════════════════════════════════════════════════
 processBtn.addEventListener('click', async () => {
-  if (!selectedFile && !selectedPath) return;
+  if (!selectedFile && !selectedPath) {
+    // Nothing selected — highlight the drop zone
+    dropZone.style.borderColor = 'var(--red)';
+    setTimeout(() => dropZone.style.borderColor = '', 1200);
+    return;
+  }
   resetResultsUI();
   setProgress(5, 'Preparing…');
+  document.getElementById('clip-progress').scrollIntoView({behavior: 'smooth', block: 'nearest'});
   processBtn.disabled = true; processBtn.textContent = 'Processing…';
 
   const form = new FormData();
@@ -550,10 +559,18 @@ processBtn.addEventListener('click', async () => {
   let res;
   try {
     res = await fetch('/process', {method: 'POST', body: form});
-  } catch(e) { showClipError(e.message); return; }
+  } catch(e) {
+    showClipError(e.message);
+    processBtn.disabled = false; processBtn.textContent = 'Find Best Moments →';
+    return;
+  }
 
   const data = await res.json();
-  if (!res.ok) { showClipError(data.error || 'Failed'); return; }
+  if (!res.ok) {
+    showClipError(data.error || 'Request failed');
+    processBtn.disabled = false; processBtn.textContent = 'Find Best Moments →';
+    return;
+  }
 
   activeJobId = data.job_id;
   pollTimer = setInterval(() => pollJob(activeJobId), 1500);
@@ -1008,7 +1025,7 @@ async function refreshUploads(autoSelectPath) {
     if (files.length) {
       document.getElementById('or-dl-row').style.display = 'block';
       document.getElementById('dl-select-row').classList.add('visible');
-      if (autoSelectPath) sel.value = autoSelectPath;
+      if (autoSelectPath) { sel.value = autoSelectPath; useDownloaded(); }
     }
   } catch(_) {}
 }
