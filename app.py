@@ -1,8 +1,13 @@
-import subprocess, base64, json, os, uuid, threading, re, shutil, time
+import subprocess, base64, json, os, uuid, threading, re, shutil
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory, render_template
-from anthropic import Anthropic
+
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
 
 try:
     import whisper as openai_whisper
@@ -29,7 +34,6 @@ FONT_PATH    = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 for d in [UPLOAD_DIR, CLIPS_DIR, FRAMES_DIR, MUSIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-client = Anthropic()
 jobs:    dict[str, dict] = {}
 dl_jobs: dict[str, dict] = {}
 history_lock = threading.Lock()
@@ -37,7 +41,6 @@ _whisper_model = None
 
 CLIP_PADDING   = 2
 FRAME_INTERVAL = 2
-VALID_TAGS     = ["Hype", "Funny", "Emotional", "Quotable", "Surprising", "Dramatic", "Wholesome", "Awkward"]
 
 PRESETS = {
     "tiktok":  {"w": 1080, "h": 1920, "label": "TikTok 9:16"},
@@ -46,16 +49,17 @@ PRESETS = {
     "youtube": {"w": 1920, "h": 1080, "label": "YouTube 16:9"},
 }
 
-VIBES = {
-    "gaming":   "Find gaming highlights: clutch plays, epic wins, rage moments, hype reactions that would go viral.",
-    "funny":    "Find the funniest moments: fails, unexpected comedy, silly reactions, awkward situations.",
-    "emotional":"Find emotionally powerful moments: heartfelt reactions, touching exchanges, dramatic reveals.",
-    "viral":    "Find moments that would go viral on TikTok/Shorts: loud reactions, surprising cuts, hype actions, quotable lines.",
-    "custom":   "",
+# Vibe → (audio_weight, scene_weight)
+VIBE_WEIGHTS = {
+    "gaming":    (0.35, 0.65),   # fast cuts matter most
+    "funny":     (0.55, 0.45),   # balanced
+    "emotional": (0.75, 0.25),   # sustained audio peaks
+    "viral":     (0.55, 0.45),   # balanced
+    "action":    (0.25, 0.75),   # scene density dominant
 }
 
 # ---------------------------------------------------------------------------
-# Startup: generate background music tracks with FFmpeg
+# Startup: generate background music with FFmpeg
 # ---------------------------------------------------------------------------
 
 def _gen_music():
@@ -64,17 +68,15 @@ def _gen_music():
                      "volume=0.5,lowpass=f=1800"),
         "hype":     ("aevalsrc=0.18*sin(2*PI*220*t)+0.12*sin(2*PI*330*t)+0.08*sin(2*PI*440*t):s=44100",
                      "volume=0.5"),
-        "chill":    ("anoisesrc=color=brown:amplitude=0.04:s=44100",
-                     "lowpass=f=500,volume=3"),
+        "chill":    ("anoisesrc=color=brown:amplitude=0.04:s=44100", "lowpass=f=500,volume=3"),
         "dramatic": ("aevalsrc=0.15*sin(2*PI*146*t)+0.1*sin(2*PI*175*t)+0.08*sin(2*PI*220*t):s=44100",
                      "volume=0.5,lowpass=f=2500"),
     }
     for name, (src, af) in tracks.items():
         fp = MUSIC_DIR / f"{name}.mp3"
         if not fp.exists():
-            subprocess.run(["ffmpeg", "-f", "lavfi", "-i", src,
-                            "-t", "120", "-af", af, str(fp), "-y"],
-                           capture_output=True)
+            subprocess.run(["ffmpeg", "-f", "lavfi", "-i", src, "-t", "120",
+                            "-af", af, str(fp), "-y"], capture_output=True)
 
 threading.Thread(target=_gen_music, daemon=True).start()
 
@@ -98,7 +100,7 @@ def append_history(session: dict):
         HISTORY_FILE.write_text(json.dumps(data, indent=2))
 
 # ---------------------------------------------------------------------------
-# Whisper
+# Whisper (for captions only — no analysis)
 # ---------------------------------------------------------------------------
 
 def get_whisper_model():
@@ -112,30 +114,233 @@ def transcribe(video_path: str) -> dict | None:
     if model is None:
         return None
     try:
-        result = model.transcribe(video_path, word_timestamps=True, verbose=False)
-        return result
+        return model.transcribe(video_path, word_timestamps=True, verbose=False)
     except Exception:
         return None
 
 # ---------------------------------------------------------------------------
-# Frames
+# LOCAL ANALYSIS — PySceneDetect + MoviePy (no API key needed)
 # ---------------------------------------------------------------------------
 
-def extract_frames(video_path: str, interval: int, job_id: str) -> list[dict]:
-    frame_dir = FRAMES_DIR / job_id
-    frame_dir.mkdir(exist_ok=True)
-    subprocess.run([
-        "ffmpeg", "-i", video_path,
-        "-vf", f"fps=1/{interval}", "-q:v", "3",
-        str(frame_dir / "frame_%04d.jpg"), "-y",
-    ], capture_output=True)
-    frames = []
-    for fname in sorted(frame_dir.iterdir()):
-        if fname.suffix == ".jpg":
-            b64 = base64.standard_b64encode(fname.read_bytes()).decode()
-            idx = int(fname.stem.split("_")[1]) - 1
-            frames.append({"timestamp": idx * interval, "b64": b64})
-    return frames
+def _analyze_audio(video_path: str, job_id: str) -> tuple:
+    """
+    Use MoviePy to extract audio and compute per-frame RMS loudness.
+    Returns (times_array, rms_array) both normalised 0-1.
+    """
+    update_job(job_id, progress=20, message="Analysing audio with MoviePy…")
+    try:
+        from moviepy import VideoFileClip
+        import numpy as np
+
+        clip = VideoFileClip(video_path)
+        if clip.audio is None:
+            clip.close()
+            return np.array([]), np.array([])
+
+        fps = 20           # 20 samples/s → 0.05 s resolution
+        arr = clip.audio.to_soundarray(fps=fps)
+        clip.close()
+
+        if arr.ndim > 1:
+            arr = arr.mean(axis=1)   # stereo → mono
+
+        # RMS in 0.5 s windows (10 samples at 20 Hz)
+        chunk = max(1, fps // 2)
+        n     = len(arr) // chunk
+        rms   = np.array([
+            float(np.sqrt(np.mean(arr[i * chunk:(i + 1) * chunk] ** 2)))
+            for i in range(n)
+        ])
+        times = np.arange(n) * (chunk / fps)
+
+        mx = rms.max()
+        if mx > 0:
+            rms = rms / mx
+
+        return times, rms
+
+    except Exception as e:
+        update_job(job_id, progress=20, message=f"Audio analysis skipped ({e})")
+        import numpy as np
+        return np.array([]), np.array([])
+
+
+def _detect_scenes(video_path: str, job_id: str) -> list[float]:
+    """
+    Use PySceneDetect to find scene-cut timestamps (seconds).
+    Returns a sorted list of cut times.
+    """
+    update_job(job_id, progress=35, message="Detecting scene changes with PySceneDetect…")
+    try:
+        from scenedetect import detect, ContentDetector
+        scene_list = detect(video_path, ContentDetector(threshold=27.0),
+                            show_progress=False)
+        # scene_list[0] always starts at 0; cuts are the start of scenes 1+
+        cuts = [scene[0].get_seconds() for scene in scene_list[1:]]
+        return cuts
+    except Exception as e:
+        update_job(job_id, progress=35, message=f"Scene detection skipped ({e})")
+        return []
+
+
+def _auto_tags(audio_mean: float, cuts_in_clip: int,
+               duration: float, score: float) -> list[str]:
+    cps  = cuts_in_clip / duration if duration > 0 else 0
+    tags: list[str] = []
+
+    if score > 0.70:            tags.append("Hype")
+    if audio_mean > 0.65 and cps < 0.25:  tags.append("Emotional")
+    if cps > 0.45:              tags.append("Surprising")
+    if audio_mean > 0.50 and cps > 0.25:  tags.append("Funny")
+    if audio_mean < 0.30 and cps > 0.35:  tags.append("Dramatic")
+    if 0.35 < audio_mean < 0.60 and cps < 0.15: tags.append("Quotable")
+    if audio_mean > 0.80:       tags.append("Wholesome")
+
+    seen, result = set(), []
+    for t in tags:
+        if t not in seen:
+            seen.add(t); result.append(t)
+        if len(result) == 3:
+            break
+    return result or ["Surprising"]
+
+
+def _auto_reason(audio_mean: float, cuts_in_clip: int,
+                 duration: float, score: float) -> str:
+    parts = []
+    pct = int(audio_mean * 100)
+    if pct > 70:
+        parts.append(f"loud audio ({pct}% peak)")
+    elif pct > 40:
+        parts.append(f"elevated audio ({pct}%)")
+    if cuts_in_clip > 5:
+        parts.append(f"{cuts_in_clip} rapid scene cuts")
+    elif cuts_in_clip > 1:
+        parts.append(f"{cuts_in_clip} scene transitions")
+    if score > 0.80:
+        parts.append("very high combined energy")
+    elif score > 0.50:
+        parts.append("high combined energy")
+    return ("Detected: " + ", ".join(parts)) if parts else f"Combined viral score {score:.0%}"
+
+
+def find_moments_local(video_path: str, vibe: str, job_id: str,
+                       alt_pass: bool = False) -> list[dict]:
+    """
+    Pure-local clip finder using PySceneDetect + MoviePy.
+    No internet or API key required.
+    """
+    import numpy as np
+
+    duration = get_video_duration(video_path)
+    if duration < 5:
+        return []
+
+    RES  = 0.5   # seconds per energy bin
+    BINS = int(duration / RES) + 1
+
+    # ── 1. Audio signal ──────────────────────────────────────────────────
+    audio_times, audio_rms = _analyze_audio(video_path, job_id)
+    audio_sig = np.zeros(BINS)
+    for t, v in zip(audio_times, audio_rms):
+        idx = int(t / RES)
+        if 0 <= idx < BINS:
+            audio_sig[idx] = v
+
+    # ── 2. Scene-density signal ──────────────────────────────────────────
+    cuts    = _detect_scenes(video_path, job_id)
+    scene_sig = np.zeros(BINS)
+    sigma   = int(3.0 / RES)       # 3-second gaussian spread
+    for ct in cuts:
+        ci = int(ct / RES)
+        for off in range(-sigma * 2, sigma * 2 + 1):
+            j = ci + off
+            if 0 <= j < BINS:
+                scene_sig[j] += float(np.exp(-0.5 * (off / sigma) ** 2))
+    if scene_sig.max() > 0:
+        scene_sig /= scene_sig.max()
+
+    # ── 3. Combined energy ───────────────────────────────────────────────
+    wa, ws = VIBE_WEIGHTS.get(vibe, (0.55, 0.45))
+    # Alternate pass: swap weights to surface different clips
+    if alt_pass:
+        wa, ws = ws, wa
+
+    energy = wa * audio_sig + ws * scene_sig
+    # Smooth over 3 s
+    kernel = np.ones(int(3 / RES)) / int(3 / RES)
+    energy = np.convolve(energy, kernel, mode="same")
+
+    update_job(job_id, progress=55, message="Scoring and selecting best moments…")
+
+    # ── 4. Peak detection (greedy, min 20 s gap) ────────────────────────
+    min_gap = int(20 / RES)
+    raw_peaks: list[tuple[int, float]] = []
+    for i in range(1, BINS - 1):
+        if energy[i] >= energy[i - 1] and energy[i] >= energy[i + 1]:
+            raw_peaks.append((i, float(energy[i])))
+    raw_peaks.sort(key=lambda x: x[1], reverse=True)
+
+    selected: list[tuple[int, float]] = []
+    taken:    list[int] = []
+    for idx, score in raw_peaks:
+        if not any(abs(idx - t) < min_gap for t in taken):
+            selected.append((idx, score))
+            taken.append(idx)
+        if len(selected) >= 6:
+            break
+
+    # ── 5. Build clip windows ────────────────────────────────────────────
+    moments: list[dict] = []
+    for peak_idx, peak_score in selected:
+        peak_t = peak_idx * RES
+
+        raw_s = max(0.0,      peak_t - 8.0)
+        raw_e = min(duration, peak_t + 10.0)
+
+        # Snap start back to a nearby scene cut (within 5 s)
+        snap_s = raw_s
+        for ct in sorted(cuts):
+            if raw_s - 5 <= ct <= raw_s:
+                snap_s = ct
+        # Snap end forward to a nearby scene cut (within 5 s)
+        snap_e = raw_e
+        for ct in sorted(cuts, reverse=True):
+            if raw_e <= ct <= raw_e + 5:
+                snap_e = ct
+                break
+
+        # Enforce duration bounds
+        cdur = snap_e - snap_s
+        if cdur < 4:
+            snap_e = min(duration, snap_s + 10.0)
+        elif cdur > 40:
+            snap_e = snap_s + 30.0
+
+        # Profile for tagging
+        si = int(snap_s / RES)
+        ei = min(BINS, int(snap_e / RES))
+        clip_audio = float(np.mean(audio_sig[si:ei])) if ei > si else 0.0
+        cuts_in    = sum(1 for ct in cuts if snap_s <= ct <= snap_e)
+        clip_dur   = snap_e - snap_s
+
+        moments.append({
+            "start":       round(snap_s, 1),
+            "end":         round(snap_e, 1),
+            "peak_moment": round(peak_t, 1),
+            "title":       f"moment_{int(peak_t)}s",
+            "reason":      _auto_reason(clip_audio, cuts_in, clip_dur, peak_score),
+            "tags":        _auto_tags(clip_audio, cuts_in, clip_dur, peak_score),
+            "viral_score": round(peak_score * 100, 1),
+        })
+
+    moments.sort(key=lambda m: m["start"])
+    return moments
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def get_video_duration(video_path: str) -> float:
     r = subprocess.run([
@@ -144,123 +349,37 @@ def get_video_duration(video_path: str) -> float:
     ], capture_output=True, text=True)
     return float(json.loads(r.stdout)["format"]["duration"])
 
-# ---------------------------------------------------------------------------
-# Claude analysis
-# ---------------------------------------------------------------------------
 
-CLAUDE_SYSTEM = """You are a viral video editor AI. You receive sampled video frames and optionally a transcript.
-Return ONLY a valid JSON array of clip objects — no markdown, no extra text.
-Each object must have exactly these keys:
-  "start"       : float  (seconds)
-  "end"         : float  (seconds)
-  "peak_moment" : float  (seconds, the single most intense instant, for zoom targeting)
-  "title"       : string (snake_case, no spaces, ≤ 30 chars)
-  "reason"      : string (1 sentence explaining why this clip is great)
-  "tags"        : array  (1-3 of: Hype Funny Emotional Quotable Surprising Dramatic Wholesome Awkward)
+def update_job(job_id: str, **kwargs):
+    if job_id in jobs:
+        jobs[job_id].update(kwargs)
 
-Pick the BEST 3-6 moments. Be selective. Timestamps are in seconds from video start."""
 
-def find_moments(frames: list[dict], vibe_text: str, transcript: str | None,
-                 exclude_ranges: list[tuple] | None, job_id: str) -> list[dict]:
-    update_job(job_id, status="analyzing", progress=50,
-               message=f"Sending {len(frames)} frames to Claude…")
+def update_dl(job_id: str, **kwargs):
+    if job_id in dl_jobs:
+        dl_jobs[job_id].update(kwargs)
 
-    transcript_block = ""
-    if transcript:
-        transcript_block = f"\n\nFULL TRANSCRIPT:\n{transcript[:6000]}"
 
-    exclude_block = ""
-    if exclude_ranges:
-        pairs = ", ".join(f"{s:.0f}s-{e:.0f}s" for s, e in exclude_ranges)
-        exclude_block = f"\n\nDO NOT include moments already selected: {pairs}"
-
-    content: list[dict] = [{
-        "type": "text",
-        "text": (f"Goal: {vibe_text}"
-                 f"{transcript_block}"
-                 f"{exclude_block}"
-                 f"\n\nFrames sampled every {FRAME_INTERVAL}s:"),
-    }]
-    for frame in frames:
-        content.append({"type": "text", "text": f"[t={frame['timestamp']}s]"})
-        content.append({"type": "image", "source": {
-            "type": "base64", "media_type": "image/jpeg", "data": frame["b64"],
-        }})
-
-    response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=2048,
-        system=CLAUDE_SYSTEM,
-        messages=[{"role": "user", "content": content}],
-    )
-    raw = response.content[0].text.strip()
-    # Strip markdown code fences if present
-    raw = re.sub(r"^```[a-z]*\n?", "", raw)
-    raw = re.sub(r"\n?```$", "", raw)
-    return json.loads(raw)
+def _strip_ansi(s: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*m", "", s)
 
 # ---------------------------------------------------------------------------
-# Conversational re-analysis
-# ---------------------------------------------------------------------------
-
-def chat_with_claude(job_id: str, user_message: str) -> dict:
-    job = jobs.get(job_id, {})
-    transcript = job.get("transcript_text", "")
-    current_clips = job.get("clips", [])
-    conversation = job.get("conversation", [])
-
-    clips_summary = "\n".join(
-        f"Clip {i+1}: [{c['start']}s-{c['end']}s] '{c['title']}' — {c['reason']} (tags: {', '.join(c.get('tags',[]))})"
-        for i, c in enumerate(current_clips)
-    )
-
-    system = (
-        "You are an AI video editor assistant. The user has already analyzed a video.\n"
-        "If the user asks for new/different clips, respond with ONLY a JSON array using the same schema as before.\n"
-        "If the user is asking a question or making a comment, respond with a short plain text answer.\n"
-        "Never mix JSON and text in the same response.\n\n"
-        f"Video transcript (first 4000 chars):\n{transcript[:4000]}\n\n"
-        f"Currently selected clips:\n{clips_summary}"
-    )
-
-    messages = list(conversation) + [{"role": "user", "content": user_message}]
-
-    response = client.messages.create(
-        model="claude-opus-4-5",
-        max_tokens=2048,
-        system=system,
-        messages=messages,
-    )
-    reply = response.content[0].text.strip()
-
-    # Detect if reply is JSON
-    stripped = re.sub(r"^```[a-z]*\n?", "", reply)
-    stripped = re.sub(r"\n?```$", "", stripped).strip()
-    try:
-        new_clips_raw = json.loads(stripped)
-        if isinstance(new_clips_raw, list):
-            return {"type": "clips", "clips": new_clips_raw, "reply": "Found new clips based on your request."}
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    return {"type": "text", "reply": reply}
-
-# ---------------------------------------------------------------------------
-# Caption generation (ASS format)
+# Caption generation (ASS)
 # ---------------------------------------------------------------------------
 
 def _ass_time(s: float) -> str:
-    h = int(s // 3600)
-    m = int((s % 3600) // 60)
-    sec = s % 60
-    return f"{h}:{m:02d}:{sec:05.2f}"
+    h  = int(s // 3600)
+    m  = int((s % 3600) // 60)
+    sc = s % 60
+    return f"{h}:{m:02d}:{sc:05.2f}"
+
 
 def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
                  path: str, vertical: bool = True):
-    w, h = (1080, 1920) if vertical else (1920, 1080)
-    fs   = 78 if vertical else 56
-    mv   = 280 if vertical else 90
-    duration = clip_end - clip_start
+    w, h  = (1080, 1920) if vertical else (1920, 1080)
+    fs    = 78 if vertical else 56
+    mv    = 280 if vertical else 90
+    dur   = clip_end - clip_start
 
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
@@ -276,47 +395,49 @@ def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
     )
 
-    events = []
-    segments = whisper_result.get("segments", [])
+    events: list[str] = []
+    segs   = whisper_result.get("segments", [])
 
-    # Collect all words in clip range
-    all_words = []
-    for seg in segments:
+    all_words: list[dict] = []
+    for seg in segs:
         for w_obj in seg.get("words", []):
-            ws = w_obj.get("start", 0)
-            we = w_obj.get("end", 0)
+            ws   = w_obj.get("start", 0)
+            we   = w_obj.get("end", 0)
             word = w_obj.get("word", "").strip()
-            if not word:
-                continue
-            if we > clip_start and ws < clip_end:
-                all_words.append({"word": word, "start": ws - clip_start, "end": we - clip_start})
+            if word and we > clip_start and ws < clip_end:
+                all_words.append({"word": word,
+                                   "start": ws - clip_start,
+                                   "end":   we - clip_start})
 
     if all_words:
-        chunk = 4
-        for i in range(0, len(all_words), chunk):
-            group = all_words[i:i + chunk]
+        for i in range(0, len(all_words), 4):
+            group = all_words[i:i + 4]
             t0 = max(0.0, group[0]["start"])
-            t1 = min(duration, group[-1]["end"])
-            if t0 >= duration:
+            t1 = min(dur,  group[-1]["end"])
+            if t0 >= dur:
                 continue
             text = " ".join(w["word"].upper() for w in group)
             text = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            events.append(f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}")
+            events.append(
+                f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}"
+            )
     else:
-        for seg in segments:
+        for seg in segs:
             ss, se = seg["start"], seg["end"]
             if se <= clip_start or ss >= clip_end:
                 continue
-            t0 = max(0.0, ss - clip_start)
-            t1 = min(duration, se - clip_start)
+            t0   = max(0.0, ss - clip_start)
+            t1   = min(dur,  se - clip_start)
             text = seg["text"].strip().upper()
             text = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
-            events.append(f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}")
+            events.append(
+                f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}"
+            )
 
     Path(path).write_text(header + "\n".join(events), encoding="utf-8")
 
 # ---------------------------------------------------------------------------
-# Clip export (two-pass: format+zoom → captions+music)
+# Clip export (two-pass: format + zoom → captions + music)
 # ---------------------------------------------------------------------------
 
 def export_clip(video_path: str, start: float, end: float, title: str, index: int,
@@ -329,182 +450,148 @@ def export_clip(video_path: str, start: float, end: float, title: str, index: in
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", title)[:40]
     cfg  = PRESETS.get(preset, PRESETS["tiktok"])
     w, h = cfg["w"], cfg["h"]
-    vertical = (h > w)
+    vert = (h > w)
 
-    padded_start = max(0.0, start - CLIP_PADDING)
-    padded_end   = end + CLIP_PADDING
-    duration     = padded_end - padded_start
-    peak_in_clip = (start - padded_start) + (end - start) / 2.0
+    ps  = max(0.0, start - CLIP_PADDING)
+    pe  = end + CLIP_PADDING
+    dur = pe - ps
+    pk  = (start - ps) + (end - start) / 2.0
 
-    temp_path  = str(output_dir / f"_tmp_{index}.mp4")
-    final_path = str(output_dir / f"clip_{index:02d}_{safe}.mp4")
+    temp  = str(output_dir / f"_tmp_{index}.mp4")
+    final = str(output_dir / f"clip_{index:02d}_{safe}.mp4")
 
-    # ── Pass 1: cut + format + optional zoom ──────────────────────────────
-    if vertical:
-        crop_vf = f"crop=ih*9/16:ih,scale={w}:{h}"
-    else:
-        crop_vf = (f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                   f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
+    # ── Pass 1: cut + format + optional zoom ─────────────────────────────
+    crop_vf = (f"crop=ih*9/16:ih,scale={w}:{h}" if vert
+               else f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
+                    f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2")
 
     if enable_zoom:
         fps = 30
-        zi = max(0, int((peak_in_clip - 0.5) * fps))
-        zo = int((peak_in_clip + 0.6) * fps)
-        zexpr = (f"if(between(on,{zi},{zo}),"
-                 f"min(zoom+0.005,1.1),"
-                 f"max(zoom-0.005,1))")
-        zoom_vf = (f"zoompan=z='{zexpr}'"
-                   f":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                   f":d=1:s={w}x{h}:fps={fps}")
-        vf1 = f"{crop_vf},fps={fps},{zoom_vf}"
+        zi  = max(0, int((pk - 0.5) * fps))
+        zo  = int((pk + 0.6) * fps)
+        ze  = (f"if(between(on,{zi},{zo}),"
+               f"min(zoom+0.005,1.1),"
+               f"max(zoom-0.005,1))")
+        vf1 = (f"{crop_vf},fps={fps},"
+               f"zoompan=z='{ze}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+               f":d=1:s={w}x{h}:fps={fps}")
     else:
         vf1 = crop_vf
 
     subprocess.run([
-        "ffmpeg", "-ss", str(padded_start), "-t", str(duration),
-        "-i", video_path,
-        "-vf", vf1,
-        "-c:v", "libx264", "-crf", "20", "-r", "30",
-        "-c:a", "aac", "-b:a", "192k",
-        temp_path, "-y",
+        "ffmpeg", "-ss", str(ps), "-t", str(dur), "-i", video_path,
+        "-vf", vf1, "-c:v", "libx264", "-crf", "20", "-r", "30",
+        "-c:a", "aac", "-b:a", "192k", temp, "-y",
     ], capture_output=True)
 
-    if not Path(temp_path).exists():
+    if not Path(temp).exists():
         return ""
 
-    # ── Pass 2: captions + music ──────────────────────────────────────────
+    # ── Pass 2: captions + music ─────────────────────────────────────────
     cap_file = None
     if enable_captions and whisper_result:
         cap_file = str(output_dir / f"_cap_{index}.ass")
-        generate_ass(whisper_result, padded_start, padded_end, cap_file, vertical)
+        generate_ass(whisper_result, ps, pe, cap_file, vert)
 
     music_path = None
     if music_track and music_track != "none":
-        candidate = MUSIC_DIR / f"{music_track}.mp3"
-        if candidate.exists():
-            music_path = str(candidate)
+        mp = MUSIC_DIR / f"{music_track}.mp3"
+        if mp.exists():
+            music_path = str(mp)
 
     has_cap   = cap_file and Path(cap_file).exists()
     has_music = bool(music_path)
 
     if not has_cap and not has_music:
-        Path(temp_path).rename(final_path)
-        return final_path
+        Path(temp).rename(final)
+        return final
 
-    inputs = ["ffmpeg", "-i", temp_path]
+    inputs = ["ffmpeg", "-i", temp]
     if has_music:
         inputs += ["-i", music_path]
 
     if has_cap and has_music:
-        # Escape colon in path for FFmpeg subtitles filter (Linux is fine, just ensure no spaces)
-        cap_esc = cap_file.replace("\\", "/")
-        fc = (f"[0:v]subtitles={cap_esc}[vout];"
-              f"[1:a]atrim=0:{duration:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
+        fc = (f"[0:v]subtitles={cap_file}[vout];"
+              f"[1:a]atrim=0:{dur:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
               f"[0:a][mus]amix=inputs=2:duration=first[aout]")
         cmd2 = inputs + ["-filter_complex", fc,
                          "-map", "[vout]", "-map", "[aout]",
-                         "-c:v", "libx264", "-crf", "20",
-                         "-c:a", "aac", final_path, "-y"]
+                         "-c:v", "libx264", "-crf", "20", "-c:a", "aac",
+                         final, "-y"]
     elif has_cap:
-        cap_esc = cap_file.replace("\\", "/")
-        cmd2 = inputs + ["-vf", f"subtitles={cap_esc}",
-                         "-c:v", "libx264", "-crf", "20",
-                         "-c:a", "copy", final_path, "-y"]
-    else:  # has_music only
-        fc = (f"[1:a]atrim=0:{duration:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
-              f"[0:a][mus]amix=inputs=2:duration=first[aout]")
+        cmd2 = inputs + ["-vf", f"subtitles={cap_file}",
+                         "-c:v", "libx264", "-crf", "20", "-c:a", "copy",
+                         final, "-y"]
+    else:
+        fc   = (f"[1:a]atrim=0:{dur:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
+                f"[0:a][mus]amix=inputs=2:duration=first[aout]")
         cmd2 = inputs + ["-filter_complex", fc,
                          "-map", "0:v", "-map", "[aout]",
-                         "-c:v", "copy", "-c:a", "aac", final_path, "-y"]
+                         "-c:v", "copy", "-c:a", "aac", final, "-y"]
 
     result = subprocess.run(cmd2, capture_output=True)
 
-    # If subtitles filter failed, retry without captions
+    # Fallback: retry without captions if subtitles filter fails
     if result.returncode != 0 and has_cap:
         if has_music:
-            fc = (f"[1:a]atrim=0:{duration:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
-                  f"[0:a][mus]amix=inputs=2:duration=first[aout]")
-            cmd3 = ["ffmpeg", "-i", temp_path, "-i", music_path,
-                    "-filter_complex", fc,
-                    "-map", "0:v", "-map", "[aout]",
-                    "-c:v", "copy", "-c:a", "aac", final_path, "-y"]
+            fc   = (f"[1:a]atrim=0:{dur:.2f},asetpts=PTS-STARTPTS,volume=0.18[mus];"
+                    f"[0:a][mus]amix=inputs=2:duration=first[aout]")
+            cmd3 = ["ffmpeg", "-i", temp, "-i", music_path,
+                    "-filter_complex", fc, "-map", "0:v", "-map", "[aout]",
+                    "-c:v", "copy", "-c:a", "aac", final, "-y"]
         else:
-            cmd3 = ["ffmpeg", "-i", temp_path, "-c", "copy", final_path, "-y"]
+            cmd3 = ["ffmpeg", "-i", temp, "-c", "copy", final, "-y"]
         subprocess.run(cmd3, capture_output=True)
 
-    Path(temp_path).unlink(missing_ok=True)
+    Path(temp).unlink(missing_ok=True)
     if cap_file:
         Path(cap_file).unlink(missing_ok=True)
 
-    return final_path if Path(final_path).exists() else ""
-
-# ---------------------------------------------------------------------------
-# Job helpers
-# ---------------------------------------------------------------------------
-
-def update_job(job_id: str, **kwargs):
-    if job_id in jobs:
-        jobs[job_id].update(kwargs)
-
-def update_dl(job_id: str, **kwargs):
-    if job_id in dl_jobs:
-        dl_jobs[job_id].update(kwargs)
+    return final if Path(final).exists() else ""
 
 # ---------------------------------------------------------------------------
 # Main processing worker
 # ---------------------------------------------------------------------------
 
-def process_video(job_id: str, video_path: str, vibe: str, custom_vibe: str,
+def process_video(job_id: str, video_path: str, vibe: str,
                   preset: str, music_track: str,
                   enable_captions: bool, enable_zoom: bool,
-                  exclude_ranges: list | None = None):
+                  alt_pass: bool = False):
     try:
-        # 1. Extract frames
-        update_job(job_id, status="extracting", progress=5,
-                   message="Extracting frames…")
-        frames = extract_frames(video_path, FRAME_INTERVAL, job_id)
-        if not frames:
-            update_job(job_id, status="error", message="Could not extract frames.")
+        # 1. Transcribe (Whisper — free/local, used only for captions)
+        whisper_result = None
+        if WHISPER_AVAILABLE and enable_captions:
+            update_job(job_id, status="transcribing", progress=10,
+                       message="Transcribing audio with Whisper (for captions)…")
+            whisper_result = transcribe(video_path)
+
+        # 2. Local analysis — PySceneDetect + MoviePy
+        update_job(job_id, status="analyzing", progress=15,
+                   message="Starting local video analysis…")
+        moments = find_moments_local(video_path, vibe, job_id, alt_pass=alt_pass)
+
+        if not moments:
+            update_job(job_id, status="error", progress=0,
+                       message="No moments detected. Try a different vibe or a longer video.")
             return
 
-        # 2. Transcribe
-        whisper_result = None
-        transcript_text = ""
-        if WHISPER_AVAILABLE:
-            update_job(job_id, progress=20, message="Transcribing audio with Whisper…")
-            whisper_result = transcribe(video_path)
-            if whisper_result:
-                transcript_text = whisper_result.get("text", "")
-
-        # 3. Determine vibe prompt
-        if vibe == "custom" and custom_vibe.strip():
-            vibe_text = custom_vibe.strip()
-        else:
-            vibe_text = VIBES.get(vibe, VIBES["viral"])
-
-        # 4. Claude analysis
-        update_job(job_id, progress=40, message=f"Analyzing {len(frames)} frames with Claude…")
-        moments = find_moments(frames, vibe_text, transcript_text or None,
-                               exclude_ranges, job_id)
-
-        shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
-
-        # 5. Export clips
+        # 3. Export clips
         update_job(job_id, status="exporting", progress=60,
-                   message=f"Found {len(moments)} moments. Exporting…")
+                   message=f"Found {len(moments)} moments. Exporting clips…")
 
-        output_dir = CLIPS_DIR / job_id
-        output_dir.mkdir(exist_ok=True)
+        out_dir = CLIPS_DIR / job_id
+        out_dir.mkdir(exist_ok=True)
 
         clips = []
         for i, m in enumerate(moments):
             pct = 60 + int((i / len(moments)) * 35)
             update_job(job_id, progress=pct,
-                       message=f"Exporting clip {i+1}/{len(moments)}: {m.get('title','clip')}…")
+                       message=f"Exporting clip {i + 1}/{len(moments)} "
+                               f"({m['title']}, viral score {m['viral_score']})…")
             out = export_clip(
                 video_path,
                 float(m["start"]), float(m["end"]),
-                m.get("title", f"clip_{i}"), i, preset, output_dir,
+                m["title"], i, preset, out_dir,
                 whisper_result=whisper_result,
                 music_track=music_track,
                 enable_zoom=enable_zoom,
@@ -514,41 +601,35 @@ def process_video(job_id: str, video_path: str, vibe: str, custom_vibe: str,
                 continue
             clips.append({
                 "file":         Path(out).name,
-                "title":        m.get("title", f"clip_{i}"),
-                "reason":       m.get("reason", ""),
-                "tags":         m.get("tags", []),
+                "title":        m["title"],
+                "reason":       m["reason"],
+                "tags":         m["tags"],
+                "viral_score":  m["viral_score"],
                 "start":        float(m["start"]),
                 "end":          float(m["end"]),
-                "peak_moment":  float(m.get("peak_moment", (m["start"] + m["end"]) / 2)),
+                "peak_moment":  float(m["peak_moment"]),
                 "download_url": f"/clips/{job_id}/{Path(out).name}",
                 "preview_url":  f"/preview/{job_id}/{Path(out).name}",
             })
 
-        # Save conversation seed + history
         jobs[job_id].update({
-            "status": "done", "progress": 100,
-            "message": "All clips exported!",
-            "clips": clips,
-            "transcript_text": transcript_text,
+            "status":     "done",
+            "progress":   100,
+            "message":    "All clips exported!",
+            "clips":      clips,
             "video_path": video_path,
-            "conversation": [],
         })
 
         append_history({
-            "id":          job_id,
-            "created_at":  datetime.utcnow().isoformat(),
-            "video_name":  Path(video_path).name,
-            "vibe":        vibe,
-            "custom_vibe": custom_vibe,
-            "preset":      preset,
-            "clip_count":  len(clips),
-            "clips":       clips,
+            "id":         job_id,
+            "created_at": datetime.utcnow().isoformat(),
+            "video_name": Path(video_path).name,
+            "vibe":       vibe,
+            "preset":     preset,
+            "clip_count": len(clips),
+            "clips":      clips,
         })
 
-    except json.JSONDecodeError as e:
-        shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
-        update_job(job_id, status="error", progress=0,
-                   message=f"Claude returned unexpected format — try again. ({e})")
     except Exception as e:
         shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
         update_job(job_id, status="error", progress=0, message=str(e))
@@ -557,19 +638,14 @@ def process_video(job_id: str, video_path: str, vibe: str, custom_vibe: str,
 # yt-dlp download worker
 # ---------------------------------------------------------------------------
 
-def _strip_ansi(s: str) -> str:
-    return re.sub(r"\x1b\[[0-9;]*m", "", s)
-
 def run_download(job_id: str, url: str):
-    downloaded_path: list[str] = []
+    downloaded: list[str] = []
 
     def progress_hook(d):
         if d["status"] == "downloading":
-            raw = _strip_ansi(d.get("_percent_str", "0%")).replace("%", "").strip()
-            try:
-                pct = min(95, int(float(raw)))
-            except ValueError:
-                pct = dl_jobs[job_id].get("progress", 0)
+            raw  = _strip_ansi(d.get("_percent_str", "0%")).replace("%", "").strip()
+            try:   pct = min(95, int(float(raw)))
+            except ValueError: pct = dl_jobs[job_id].get("progress", 0)
             speed = _strip_ansi(d.get("_speed_str", "")).strip()
             eta   = _strip_ansi(d.get("_eta_str", "")).strip()
             msg   = f"Downloading… {pct}%"
@@ -578,38 +654,35 @@ def run_download(job_id: str, url: str):
             update_dl(job_id, progress=pct, message=msg)
         elif d["status"] == "finished":
             update_dl(job_id, progress=96, message="Finalising…")
-            downloaded_path.append(d.get("filename", ""))
+            downloaded.append(d.get("filename", ""))
 
-    outtmpl = str(UPLOAD_DIR / "%(title).80s.%(ext)s")
+    outtmpl  = str(UPLOAD_DIR / "%(title).80s.%(ext)s")
     ydl_opts = {
-        "format":             "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-        "merge_output_format":"mp4",
-        "outtmpl":            outtmpl,
-        "progress_hooks":     [progress_hook],
-        "quiet":              True,
-        "no_warnings":        True,
-        "noplaylist":         True,
-        "postprocessors": [{
-            "key":            "FFmpegVideoConvertor",
-            "preferedformat": "mp4",
-        }],
+        "format":              "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
+                               "/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+        "merge_output_format": "mp4",
+        "outtmpl":             outtmpl,
+        "progress_hooks":      [progress_hook],
+        "quiet":               True,
+        "no_warnings":         True,
+        "noplaylist":          True,
     }
-
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info       = ydl.extract_info(url, download=True)
             final_path = ydl.prepare_filename(info)
             if not Path(final_path).exists():
                 final_path = str(Path(final_path).with_suffix(".mp4"))
-            if not Path(final_path).exists() and downloaded_path:
-                final_path = downloaded_path[0]
+            if not Path(final_path).exists() and downloaded:
+                final_path = downloaded[0]
 
         filename = Path(final_path).name
         update_dl(job_id, status="done", progress=100,
                   message=f"Ready: {filename}",
                   filename=filename, filepath=str(final_path))
     except Exception as e:
-        update_dl(job_id, status="error", progress=0, message=_strip_ansi(str(e)))
+        update_dl(job_id, status="error", progress=0,
+                  message=_strip_ansi(str(e)))
 
 # ---------------------------------------------------------------------------
 # Routes
@@ -622,28 +695,14 @@ def index():
 
 @app.route("/process", methods=["POST"])
 def process():
-    vibe           = request.form.get("vibe", "viral")
-    custom_vibe    = request.form.get("custom_vibe", "")
-    preset         = request.form.get("preset", "tiktok")
-    music_track    = request.form.get("music", "none")
-    enable_captions= request.form.get("captions", "true").lower() == "true"
-    enable_zoom    = request.form.get("zoom", "true").lower() == "true"
-    exclude_json   = request.form.get("exclude", "")
-    url            = request.form.get("url", "").strip()
+    vibe            = request.form.get("vibe", "viral")
+    preset          = request.form.get("preset", "tiktok")
+    music_track     = request.form.get("music", "none")
+    enable_captions = request.form.get("captions", "true").lower() == "true"
+    enable_zoom     = request.form.get("zoom", "true").lower() == "true"
 
-    exclude_ranges = []
-    if exclude_json:
-        try:
-            exclude_ranges = json.loads(exclude_json)
-        except Exception:
-            pass
-
-    # Resolve video path
     existing_path = request.form.get("video_path", "").strip()
-    if url:
-        # Inline YouTube URL — download first synchronously (but in a temp job)
-        return jsonify({"error": "Use inline_url endpoint for URL input"}), 400
-    elif existing_path:
+    if existing_path:
         candidate = Path(existing_path).resolve()
         if not str(candidate).startswith(str(UPLOAD_DIR.resolve())):
             return jsonify({"error": "Invalid video path"}), 400
@@ -651,22 +710,22 @@ def process():
             return jsonify({"error": "File not found"}), 400
         video_path = str(candidate)
     elif "video" in request.files and request.files["video"].filename:
-        video_file = request.files["video"]
-        ext        = Path(video_file.filename).suffix or ".mp4"
+        f   = request.files["video"]
+        ext = Path(f.filename).suffix or ".mp4"
         video_path = str(UPLOAD_DIR / f"{uuid.uuid4()}{ext}")
-        video_file.save(video_path)
+        f.save(video_path)
     else:
         return jsonify({"error": "No video provided"}), 400
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued", "progress": 0,
                     "message": "Queued…", "clips": [],
-                    "video_path": video_path, "conversation": []}
+                    "video_path": video_path}
 
     threading.Thread(
         target=process_video,
-        args=(job_id, video_path, vibe, custom_vibe, preset,
-              music_track, enable_captions, enable_zoom, exclude_ranges or None),
+        args=(job_id, video_path, vibe, preset, music_track,
+              enable_captions, enable_zoom),
         daemon=True,
     ).start()
 
@@ -675,51 +734,48 @@ def process():
 
 @app.route("/process-url", methods=["POST"])
 def process_url():
-    """Download a URL then immediately start clipping."""
     data = request.get_json(silent=True) or {}
-    url = (data.get("url") or "").strip()
+    url  = (data.get("url") or "").strip()
     if not url:
         return jsonify({"error": "No URL"}), 400
 
     opts = data.get("options", {})
-    vibe           = opts.get("vibe", "viral")
-    custom_vibe    = opts.get("custom_vibe", "")
-    preset         = opts.get("preset", "tiktok")
-    music_track    = opts.get("music", "none")
-    enable_captions= opts.get("captions", True)
-    enable_zoom    = opts.get("zoom", True)
+    vibe            = opts.get("vibe", "viral")
+    preset          = opts.get("preset", "tiktok")
+    music_track     = opts.get("music", "none")
+    enable_captions = opts.get("captions", True)
+    enable_zoom     = opts.get("zoom", True)
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "downloading", "progress": 2,
                     "message": "Downloading video…", "clips": [],
-                    "video_path": "", "conversation": []}
+                    "video_path": ""}
 
     def worker():
         downloaded: list[str] = []
 
-        def progress_hook(d):
+        def ph(d):
             if d["status"] == "downloading":
-                raw = _strip_ansi(d.get("_percent_str", "0%")).replace("%", "").strip()
-                try:
-                    pct = max(2, min(25, int(float(raw)) // 4))
-                except ValueError:
-                    pct = jobs[job_id].get("progress", 2)
+                raw  = _strip_ansi(d.get("_percent_str", "0%")).replace("%", "").strip()
+                try:   pct = max(2, min(25, int(float(raw)) // 4))
+                except ValueError: pct = 2
                 speed = _strip_ansi(d.get("_speed_str", "")).strip()
                 update_job(job_id, progress=pct,
                            message=f"Downloading… {speed}" if speed else "Downloading…")
             elif d["status"] == "finished":
-                update_job(job_id, progress=26, message="Download complete, processing…")
+                update_job(job_id, progress=26, message="Download complete, analysing…")
                 downloaded.append(d.get("filename", ""))
 
-        outtmpl = str(UPLOAD_DIR / "%(title).80s.%(ext)s")
+        outtmpl  = str(UPLOAD_DIR / "%(title).80s.%(ext)s")
         ydl_opts = {
-            "format":             "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
-            "merge_output_format":"mp4",
-            "outtmpl":            outtmpl,
-            "progress_hooks":     [progress_hook],
-            "quiet":              True,
-            "no_warnings":        True,
-            "noplaylist":         True,
+            "format":              "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]"
+                                   "/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+            "merge_output_format": "mp4",
+            "outtmpl":             outtmpl,
+            "progress_hooks":      [ph],
+            "quiet":               True,
+            "no_warnings":         True,
+            "noplaylist":          True,
         }
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -731,10 +787,11 @@ def process_url():
                     final_path = downloaded[0]
 
             jobs[job_id]["video_path"] = str(final_path)
-            process_video(job_id, str(final_path), vibe, custom_vibe, preset,
-                          music_track, enable_captions, enable_zoom, None)
+            process_video(job_id, str(final_path), vibe, preset,
+                          music_track, enable_captions, enable_zoom)
         except Exception as e:
-            update_job(job_id, status="error", message=_strip_ansi(str(e)))
+            update_job(job_id, status="error",
+                       message=_strip_ansi(str(e)))
 
     threading.Thread(target=worker, daemon=True).start()
     return jsonify({"job_id": job_id})
@@ -749,114 +806,56 @@ def reclip(job_id: str):
     if not video_path or not Path(video_path).exists():
         return jsonify({"error": "Original video no longer available"}), 400
 
-    data           = request.get_json(silent=True) or {}
-    vibe           = data.get("vibe", "viral")
-    custom_vibe    = data.get("custom_vibe", "")
-    preset         = data.get("preset", "tiktok")
-    music_track    = data.get("music", "none")
-    enable_captions= data.get("captions", True)
-    enable_zoom    = data.get("zoom", True)
+    data            = request.get_json(silent=True) or {}
+    vibe            = data.get("vibe", "viral")
+    preset          = data.get("preset", "tiktok")
+    music_track     = data.get("music", "none")
+    enable_captions = data.get("captions", True)
+    enable_zoom     = data.get("zoom", True)
 
-    # Exclude current clip ranges so Claude picks different moments
-    exclude_ranges = [(c["start"], c["end"]) for c in job.get("clips", [])]
-
-    new_job_id = str(uuid.uuid4())
-    jobs[new_job_id] = {"status": "queued", "progress": 0,
-                        "message": "Queued for re-analysis…", "clips": [],
-                        "video_path": video_path, "conversation": []}
+    new_id = str(uuid.uuid4())
+    jobs[new_id] = {"status": "queued", "progress": 0,
+                    "message": "Re-analysing with alternate weights…",
+                    "clips": [], "video_path": video_path}
 
     threading.Thread(
         target=process_video,
-        args=(new_job_id, video_path, vibe, custom_vibe, preset,
-              music_track, enable_captions, enable_zoom, exclude_ranges),
+        args=(new_id, video_path, vibe, preset, music_track,
+              enable_captions, enable_zoom, True),   # alt_pass=True
         daemon=True,
     ).start()
 
-    return jsonify({"job_id": new_job_id})
-
-
-@app.route("/chat/<job_id>", methods=["POST"])
-def chat(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        return jsonify({"error": "Job not found"}), 404
-    data    = request.get_json(silent=True) or {}
-    message = (data.get("message") or "").strip()
-    if not message:
-        return jsonify({"error": "Empty message"}), 400
-
-    result = chat_with_claude(job_id, message)
-
-    # Update conversation history
-    conversation = job.get("conversation", [])
-    conversation.append({"role": "user", "content": message})
-    conversation.append({"role": "assistant", "content":
-                          json.dumps(result.get("clips")) if result["type"] == "clips"
-                          else result["reply"]})
-    jobs[job_id]["conversation"] = conversation[-20:]  # keep last 10 exchanges
-
-    # If new clips, export them
-    if result["type"] == "clips":
-        video_path = job.get("video_path", "")
-        preset     = job.get("preset", "tiktok")
-        whisper_r  = job.get("_whisper_result")  # may be None
-        if video_path and Path(video_path).exists():
-            output_dir = CLIPS_DIR / job_id
-            output_dir.mkdir(exist_ok=True)
-            new_clips = []
-            base_idx  = len(job.get("clips", []))
-            for i, m in enumerate(result["clips"]):
-                out = export_clip(video_path, float(m["start"]), float(m["end"]),
-                                  m.get("title", f"reclip_{i}"),
-                                  base_idx + i, preset, output_dir,
-                                  whisper_result=whisper_r)
-                if out:
-                    new_clips.append({
-                        "file":         Path(out).name,
-                        "title":        m.get("title", f"reclip_{i}"),
-                        "reason":       m.get("reason", ""),
-                        "tags":         m.get("tags", []),
-                        "start":        float(m["start"]),
-                        "end":          float(m["end"]),
-                        "peak_moment":  float(m.get("peak_moment", (m["start"] + m["end"]) / 2)),
-                        "download_url": f"/clips/{job_id}/{Path(out).name}",
-                        "preview_url":  f"/preview/{job_id}/{Path(out).name}",
-                    })
-            result["new_clips"] = new_clips
-
-    return jsonify(result)
+    return jsonify({"job_id": new_id})
 
 
 @app.route("/trim", methods=["POST"])
 def trim():
-    data     = request.get_json(silent=True) or {}
-    job_id   = data.get("job_id", "")
-    clip_idx = int(data.get("clip_index", 0))
-    new_start= float(data.get("start", 0))
-    new_end  = float(data.get("end", 10))
+    data      = request.get_json(silent=True) or {}
+    job_id    = data.get("job_id", "")
+    clip_idx  = int(data.get("clip_index", 0))
+    new_start = float(data.get("start", 0))
+    new_end   = float(data.get("end", 10))
 
     job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Job not found"}), 404
-
     video_path = job.get("video_path", "")
     if not video_path or not Path(video_path).exists():
         return jsonify({"error": "Video not found"}), 400
 
-    preset    = data.get("preset", "tiktok")
-    music     = data.get("music", "none")
-    captions  = data.get("captions", True)
-    zoom      = data.get("zoom", False)
-    title     = data.get("title", f"retrim_{clip_idx}")
+    preset  = data.get("preset", "tiktok")
+    music   = data.get("music", "none")
+    captions = data.get("captions", True)
+    zoom    = data.get("zoom", False)
+    title   = data.get("title", f"retrim_{clip_idx}")
 
-    output_dir = CLIPS_DIR / job_id
-    output_dir.mkdir(exist_ok=True)
-    whisper_r  = job.get("_whisper_result")
+    out_dir = CLIPS_DIR / job_id
+    out_dir.mkdir(exist_ok=True)
 
     out = export_clip(video_path, new_start, new_end, f"trim_{title}",
-                      clip_idx + 100, preset, output_dir,
-                      whisper_result=whisper_r, music_track=music,
-                      enable_zoom=zoom, enable_captions=captions)
+                      clip_idx + 100, preset, out_dir,
+                      music_track=music, enable_zoom=zoom,
+                      enable_captions=captions)
     if not out:
         return jsonify({"error": "Export failed"}), 500
 
@@ -872,11 +871,7 @@ def status(job_id: str):
     job = jobs.get(job_id)
     if not job:
         return jsonify({"error": "Not found"}), 404
-    # Don't send large transcript in poll responses
-    safe = {k: v for k, v in job.items()
-            if k not in ("transcript_text", "_whisper_result", "conversation")}
-    safe["has_conversation"] = len(job.get("conversation", [])) > 0
-    return jsonify(safe)
+    return jsonify({k: v for k, v in job.items() if k != "_whisper"})
 
 
 @app.route("/clips/<job_id>/<filename>")
@@ -902,7 +897,7 @@ def serve_original(job_id: str):
 
 @app.route("/uploads")
 def list_uploads():
-    exts = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
+    exts  = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
     files = []
     for f in sorted(UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
         if f.suffix.lower() in exts:
@@ -934,16 +929,13 @@ def download_status(job_id: str):
 
 @app.route("/history")
 def get_history():
-    data = load_history()
-    return jsonify(data)
+    return jsonify(load_history())
 
 
 @app.route("/music")
 def list_music():
-    tracks = []
-    for f in sorted(MUSIC_DIR.iterdir()):
-        if f.suffix == ".mp3":
-            tracks.append({"id": f.stem, "label": f.stem.title()})
+    tracks = [{"id": f.stem, "label": f.stem.title()}
+              for f in sorted(MUSIC_DIR.iterdir()) if f.suffix == ".mp3"]
     return jsonify(tracks)
 
 
