@@ -2,7 +2,7 @@ import subprocess, base64, json, os, uuid, threading, re, shutil, time
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_from_directory, render_template
-from anthropic import Anthropic
+from anthropic import Anthropic, AuthenticationError
 
 try:
     import whisper as openai_whisper
@@ -29,7 +29,28 @@ FONT_PATH    = "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf"
 for d in [UPLOAD_DIR, CLIPS_DIR, FRAMES_DIR, MUSIC_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
-client = Anthropic()
+CONFIG_FILE = Path("config.json")
+
+def load_config() -> dict:
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+def save_config(data: dict):
+    cfg = load_config()
+    cfg.update(data)
+    CONFIG_FILE.write_text(json.dumps(cfg, indent=2))
+
+def get_api_key() -> str:
+    return load_config().get("api_key") or os.environ.get("ANTHROPIC_API_KEY", "")
+
+def make_client() -> Anthropic:
+    key = get_api_key()
+    return Anthropic(api_key=key) if key else Anthropic()
+
 jobs:    dict[str, dict] = {}
 dl_jobs: dict[str, dict] = {}
 history_lock = threading.Lock()
@@ -187,7 +208,7 @@ def find_moments(frames: list[dict], vibe_text: str, transcript: str | None,
             "type": "base64", "media_type": "image/jpeg", "data": frame["b64"],
         }})
 
-    response = client.messages.create(
+    response = make_client().messages.create(
         model="claude-opus-4-5",
         max_tokens=2048,
         system=CLAUDE_SYSTEM,
@@ -225,7 +246,7 @@ def chat_with_claude(job_id: str, user_message: str) -> dict:
 
     messages = list(conversation) + [{"role": "user", "content": user_message}]
 
-    response = client.messages.create(
+    response = make_client().messages.create(
         model="claude-opus-4-5",
         max_tokens=2048,
         system=system,
@@ -549,6 +570,10 @@ def process_video(job_id: str, video_path: str, vibe: str, custom_vibe: str,
         shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
         update_job(job_id, status="error", progress=0,
                    message=f"Claude returned unexpected format — try again. ({e})")
+    except AuthenticationError:
+        shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
+        update_job(job_id, status="error", progress=0,
+                   message="Invalid or missing Anthropic API key. Enter your key in Settings (⚙ top-right).")
     except Exception as e:
         shutil.rmtree(FRAMES_DIR / job_id, ignore_errors=True)
         update_job(job_id, status="error", progress=0, message=str(e))
@@ -945,6 +970,27 @@ def list_music():
         if f.suffix == ".mp3":
             tracks.append({"id": f.stem, "label": f.stem.title()})
     return jsonify(tracks)
+
+
+@app.route("/config", methods=["GET"])
+def get_config():
+    key = get_api_key()
+    return jsonify({
+        "has_key": bool(key),
+        # Mask all but last 4 chars
+        "key_preview": ("sk-ant-…" + key[-4:]) if len(key) > 4 else ("set" if key else ""),
+    })
+
+@app.route("/config", methods=["POST"])
+def set_config():
+    data = request.get_json(silent=True) or {}
+    key  = (data.get("api_key") or "").strip()
+    if not key:
+        return jsonify({"error": "No key provided"}), 400
+    if not key.startswith("sk-"):
+        return jsonify({"error": "Key should start with sk-"}), 400
+    save_config({"api_key": key})
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

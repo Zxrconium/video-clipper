@@ -251,12 +251,36 @@ button.retrim-btn:hover{background:var(--border2)}
 <!-- ── HEADER ── -->
 <header>
   <span class="logo">✦ AI Video Clipper</span>
-  <div class="nav-tabs">
-    <button class="nav-tab active" data-panel="clip">Clip</button>
-    <button class="nav-tab" data-panel="download">Download</button>
-    <button class="nav-tab" data-panel="history">History</button>
+  <div style="display:flex;align-items:center;gap:8px">
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-panel="clip">Clip</button>
+      <button class="nav-tab" data-panel="download">Download</button>
+      <button class="nav-tab" data-panel="history">History</button>
+    </div>
+    <button id="settings-btn" title="API Key Settings" style="background:none;border:1px solid var(--border2);border-radius:8px;color:var(--muted);padding:6px 10px;cursor:pointer;font-size:.9rem;transition:color .15s" onmouseenter="this.style.color='var(--text)'" onmouseleave="this.style.color='var(--muted)'">⚙</button>
   </div>
 </header>
+
+<!-- ── SETTINGS MODAL ── -->
+<div id="settings-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center">
+  <div style="background:var(--card);border:1px solid var(--border2);border-radius:16px;padding:28px;width:100%;max-width:440px;margin:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
+      <h2 style="font-size:1rem;font-weight:700">API Key Settings</h2>
+      <button onclick="closeSettings()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:1.3rem;line-height:1">×</button>
+    </div>
+    <p style="font-size:.82rem;color:var(--muted);margin-bottom:16px;line-height:1.5">
+      Enter your <strong style="color:var(--text)">Anthropic API key</strong> to power Claude analysis.<br>
+      Get one at <span style="color:#a78bfa">console.anthropic.com</span>. It's saved locally in <code style="font-size:.78rem;background:var(--surface);padding:1px 5px;border-radius:4px">config.json</code>.
+    </p>
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input type="password" id="api-key-input" placeholder="sk-ant-api03-…"
+        style="flex:1;background:var(--surface);border:1px solid var(--border2);border-radius:8px;color:var(--text);padding:10px 12px;font-size:.875rem;outline:none;font-family:monospace"
+        onfocus="this.style.borderColor='var(--purple)'" onblur="this.style.borderColor='var(--border2)'"/>
+      <button onclick="saveApiKey()" class="btn-primary" style="padding:10px 18px;white-space:nowrap">Save</button>
+    </div>
+    <div id="key-status" style="font-size:.8rem;color:var(--muted);min-height:18px"></div>
+  </div>
+</div>
 
 <main>
 
@@ -1104,6 +1128,53 @@ function fmtTime(s) {
   s = Math.round(s);
   return s < 60 ? `${s}s` : `${Math.floor(s/60)}m${String(s%60).padStart(2,'0')}s`;
 }
+
+// ═══════════════════════════════════════════════════════════
+//  SETTINGS / API KEY
+// ═══════════════════════════════════════════════════════════
+const overlay = document.getElementById('settings-overlay');
+
+document.getElementById('settings-btn').addEventListener('click', openSettings);
+overlay.addEventListener('click', e => { if (e.target === overlay) closeSettings(); });
+document.getElementById('api-key-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveApiKey();
+});
+
+function openSettings() {
+  overlay.style.display = 'flex';
+  fetch('/config').then(r => r.json()).then(d => {
+    const st = document.getElementById('key-status');
+    if (d.has_key) st.textContent = `✓ Key saved (${d.key_preview})`;
+    else           st.textContent = 'No key set yet.';
+  });
+}
+
+function closeSettings() { overlay.style.display = 'none'; }
+
+async function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  const st  = document.getElementById('key-status');
+  if (!key) { st.textContent = 'Please enter a key.'; return; }
+  const res  = await fetch('/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({api_key: key}),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    st.style.color = 'var(--green)';
+    st.textContent = '✓ Key saved! You can now clip videos.';
+    document.getElementById('api-key-input').value = '';
+    setTimeout(closeSettings, 1200);
+  } else {
+    st.style.color = 'var(--red)';
+    st.textContent = '✗ ' + (data.error || 'Failed to save.');
+  }
+}
+
+// Show settings modal automatically if no key configured
+fetch('/config').then(r => r.json()).then(d => {
+  if (!d.has_key) openSettings();
+});
 </script>
 </body>
 </html>
