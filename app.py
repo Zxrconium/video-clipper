@@ -250,10 +250,10 @@ def find_moments_local(video_path: str, vibe: str, job_id: str,
     # ── 2. Scene-density signal ──────────────────────────────────────────
     cuts    = _detect_scenes(video_path, job_id)
     scene_sig = np.zeros(BINS)
-    sigma   = int(3.0 / RES)       # 3-second gaussian spread
+    sigma   = max(1, int(1.0 / RES))  # 1-second gaussian — keeps peaks sharp
     for ct in cuts:
         ci = int(ct / RES)
-        for off in range(-sigma * 2, sigma * 2 + 1):
+        for off in range(-sigma * 3, sigma * 3 + 1):
             j = ci + off
             if 0 <= j < BINS:
                 scene_sig[j] += float(np.exp(-0.5 * (off / sigma) ** 2))
@@ -262,33 +262,48 @@ def find_moments_local(video_path: str, vibe: str, job_id: str,
 
     # ── 3. Combined energy ───────────────────────────────────────────────
     wa, ws = VIBE_WEIGHTS.get(vibe, (0.55, 0.45))
-    # Alternate pass: swap weights to surface different clips
     if alt_pass:
         wa, ws = ws, wa
 
     energy = wa * audio_sig + ws * scene_sig
-    # Smooth over 3 s
-    kernel = np.ones(int(3 / RES)) / int(3 / RES)
+    # Light smoothing: 1 s window preserves local structure
+    k_bins = max(1, int(1.0 / RES))
+    kernel = np.ones(k_bins) / k_bins
     energy = np.convolve(energy, kernel, mode="same")
+
+    # Subtract a slow-moving baseline so relative peaks stand out over
+    # sustained high-energy sections (common in gaming videos with BGM)
+    baseline_bins = max(1, int(30.0 / RES))
+    baseline_kernel = np.ones(baseline_bins) / baseline_bins
+    baseline = np.convolve(energy, baseline_kernel, mode="same")
+    energy = np.clip(energy - 0.5 * baseline, 0, None)
 
     update_job(job_id, progress=55, message="Scoring and selecting best moments…")
 
-    # ── 4. Peak detection (greedy, min 20 s gap) ────────────────────────
-    min_gap = int(20 / RES)
-    raw_peaks: list[tuple[int, float]] = []
-    for i in range(1, BINS - 1):
-        if energy[i] >= energy[i - 1] and energy[i] >= energy[i + 1]:
-            raw_peaks.append((i, float(energy[i])))
-    raw_peaks.sort(key=lambda x: x[1], reverse=True)
+    # ── 4. Peak detection (greedy, adaptive gap) ─────────────────────────
+    # Gap scales with video length so we always find several clips
+    min_gap_s = max(15.0, min(45.0, duration / 12))
+    min_gap   = int(min_gap_s / RES)
 
-    selected: list[tuple[int, float]] = []
-    taken:    list[int] = []
-    for idx, score in raw_peaks:
-        if not any(abs(idx - t) < min_gap for t in taken):
-            selected.append((idx, score))
-            taken.append(idx)
-        if len(selected) >= 6:
-            break
+    def _pick_peaks(gap: int, limit: int) -> list[tuple[int, float]]:
+        raw: list[tuple[int, float]] = []
+        for i in range(1, BINS - 1):
+            if energy[i] > energy[i - 1] and energy[i] >= energy[i + 1]:
+                raw.append((i, float(energy[i])))
+        raw.sort(key=lambda x: x[1], reverse=True)
+        out, taken = [], []
+        for idx, score in raw:
+            if not any(abs(idx - t) < gap for t in taken):
+                out.append((idx, score))
+                taken.append(idx)
+            if len(out) >= limit:
+                break
+        return out
+
+    selected = _pick_peaks(min_gap, 6)
+    # Fallback: halve the gap to get at least 3 clips
+    if len(selected) < 3 and duration > 30:
+        selected = _pick_peaks(max(1, min_gap // 2), 6)
 
     # ── 5. Build clip windows ────────────────────────────────────────────
     moments: list[dict] = []
