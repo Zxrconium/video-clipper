@@ -340,7 +340,23 @@ button.retrim-btn:hover{background:var(--border2)}
       </div>
       <div class="toggle-row">
         <span class="toggle-label">🔤 Auto-captions</span>
-        <label class="toggle"><input type="checkbox" id="tog-captions" checked/><span class="slider"></span></label>
+        <label class="toggle"><input type="checkbox" id="tog-captions" checked onchange="toggleCaptionOpts()"/><span class="slider"></span></label>
+      </div>
+      <div id="caption-opts" style="display:flex;flex-direction:column;gap:10px">
+        <div class="field">
+          <label class="field-label">Caption style</label>
+          <select id="caption-style-select">
+            <option value="karaoke">✨ Karaoke (word highlight)</option>
+            <option value="classic">📝 Classic (plain white)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label class="field-label">Transcription quality</label>
+          <select id="whisper-model-select">
+            <option value="small">Better — small model</option>
+            <option value="base">Faster — base model</option>
+          </select>
+        </div>
       </div>
       <div class="toggle-row">
         <span class="toggle-label">🔍 Zoom punch</span>
@@ -576,13 +592,20 @@ processBtn.addEventListener('click', async () => {
   pollTimer = setInterval(() => pollJob(activeJobId), 1500);
 });
 
+function toggleCaptionOpts() {
+  const on = document.getElementById('tog-captions').checked;
+  document.getElementById('caption-opts').style.display = on ? 'flex' : 'none';
+}
+
 function gatherOptions() {
   return {
-    vibe:     document.getElementById('vibe-select').value,
-    preset:   document.getElementById('preset-select').value,
-    music:    document.getElementById('music-select').value,
-    captions: document.getElementById('tog-captions').checked,
-    zoom:     document.getElementById('tog-zoom').checked,
+    vibe:          document.getElementById('vibe-select').value,
+    preset:        document.getElementById('preset-select').value,
+    music:         document.getElementById('music-select').value,
+    captions:      document.getElementById('tog-captions').checked,
+    zoom:          document.getElementById('tog-zoom').checked,
+    caption_style: document.getElementById('caption-style-select').value,
+    whisper_model: document.getElementById('whisper-model-select').value,
   };
 }
 

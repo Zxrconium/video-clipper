@@ -103,14 +103,18 @@ def append_history(session: dict):
 # Whisper (for captions only — no analysis)
 # ---------------------------------------------------------------------------
 
-def get_whisper_model():
-    global _whisper_model
-    if _whisper_model is None and WHISPER_AVAILABLE:
-        _whisper_model = openai_whisper.load_model("base")
+_whisper_model_name = "small"
+
+def get_whisper_model(model_name: str = "small"):
+    global _whisper_model, _whisper_model_name
+    if _whisper_model is None or _whisper_model_name != model_name:
+        if WHISPER_AVAILABLE:
+            _whisper_model = openai_whisper.load_model(model_name)
+            _whisper_model_name = model_name
     return _whisper_model
 
-def transcribe(video_path: str) -> dict | None:
-    model = get_whisper_model()
+def transcribe(video_path: str, model_name: str = "small") -> dict | None:
+    model = get_whisper_model(model_name)
     if model is None:
         return None
     try:
@@ -390,11 +394,20 @@ def _ass_time(s: float) -> str:
 
 
 def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
-                 path: str, vertical: bool = True):
+                 path: str, vertical: bool = True, caption_style: str = "karaoke"):
     w, h  = (1080, 1920) if vertical else (1920, 1080)
     fs    = 78 if vertical else 56
     mv    = 280 if vertical else 90
     dur   = clip_end - clip_start
+
+    # Karaoke: white pre-highlight → yellow on spoken word
+    # Classic: plain white
+    if caption_style == "karaoke":
+        primary   = "&H0000FFFF"   # yellow (BGR: 00FFFF → R=FF G=FF B=00)
+        secondary = "&H00FFFFFF"   # white  (pre-highlight)
+    else:
+        primary   = "&H00FFFFFF"
+        secondary = "&H000000FF"
 
     header = (
         "[Script Info]\nScriptType: v4.00+\n"
@@ -404,7 +417,7 @@ def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
         "OutlineColour, BackColour, Bold, Italic, Underline, Strikeout, "
         "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
         "Alignment, MarginL, MarginR, MarginV, Encoding\n"
-        f"Style: Default,Arial Black,{fs},&H00FFFFFF,&H000000FF,&H00000000,"
+        f"Style: Default,Arial Black,{fs},{primary},{secondary},&H00000000,"
         f"&H80000000,-1,0,0,0,100,100,0,0,1,5,2,2,40,40,{mv},1\n\n"
         "[Events]\n"
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
@@ -424,6 +437,9 @@ def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
                                    "start": ws - clip_start,
                                    "end":   we - clip_start})
 
+    def _esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
     if all_words:
         for i in range(0, len(all_words), 4):
             group = all_words[i:i + 4]
@@ -431,8 +447,24 @@ def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
             t1 = min(dur,  group[-1]["end"])
             if t0 >= dur:
                 continue
-            text = " ".join(w["word"].upper() for w in group)
-            text = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
+
+            if caption_style == "karaoke":
+                # {\kN} = N centiseconds for this word; libass sweeps
+                # secondary→primary colour word-by-word
+                parts = []
+                cursor = t0
+                for w_obj in group:
+                    gap_cs  = max(0, int((w_obj["start"] - cursor) * 100))
+                    word_cs = max(10, int((w_obj["end"] - w_obj["start"]) * 100))
+                    if gap_cs > 0 and parts:
+                        # absorb leading gap into previous word's tag duration
+                        parts[-1] = parts[-1]   # no-op; gap already falls inside prev end
+                    parts.append(f"{{\\k{word_cs}}}{_esc(w_obj['word'].upper())}")
+                    cursor = w_obj["end"]
+                text = " ".join(parts)
+            else:
+                text = _esc(" ".join(w["word"].upper() for w in group))
+
             events.append(
                 f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}"
             )
@@ -443,10 +475,8 @@ def generate_ass(whisper_result: dict, clip_start: float, clip_end: float,
                 continue
             t0   = max(0.0, ss - clip_start)
             t1   = min(dur,  se - clip_start)
-            text = seg["text"].strip().upper()
-            text = text.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
             events.append(
-                f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{text}"
+                f"Dialogue: 0,{_ass_time(t0)},{_ass_time(t1)},Default,,0,0,0,,{_esc(seg['text'].strip().upper())}"
             )
 
     Path(path).write_text(header + "\n".join(events), encoding="utf-8")
@@ -460,7 +490,8 @@ def export_clip(video_path: str, start: float, end: float, title: str, index: in
                 whisper_result: dict | None = None,
                 music_track: str | None = None,
                 enable_zoom: bool = True,
-                enable_captions: bool = True) -> str:
+                enable_captions: bool = True,
+                caption_style: str = "karaoke") -> str:
 
     safe = re.sub(r"[^a-zA-Z0-9_]", "_", title)[:40]
     cfg  = PRESETS.get(preset, PRESETS["tiktok"])
@@ -506,7 +537,7 @@ def export_clip(video_path: str, start: float, end: float, title: str, index: in
     cap_file = None
     if enable_captions and whisper_result:
         cap_file = str(output_dir / f"_cap_{index}.ass")
-        generate_ass(whisper_result, ps, pe, cap_file, vert)
+        generate_ass(whisper_result, ps, pe, cap_file, vert, caption_style)
 
     music_path = None
     if music_track and music_track != "none":
@@ -571,14 +602,16 @@ def export_clip(video_path: str, start: float, end: float, title: str, index: in
 def process_video(job_id: str, video_path: str, vibe: str,
                   preset: str, music_track: str,
                   enable_captions: bool, enable_zoom: bool,
-                  alt_pass: bool = False):
+                  alt_pass: bool = False,
+                  caption_style: str = "karaoke",
+                  whisper_model: str = "small"):
     try:
         # 1. Transcribe (Whisper — free/local, used only for captions)
         whisper_result = None
         if WHISPER_AVAILABLE and enable_captions:
             update_job(job_id, status="transcribing", progress=10,
-                       message="Transcribing audio with Whisper (for captions)…")
-            whisper_result = transcribe(video_path)
+                       message=f"Transcribing audio with Whisper ({whisper_model})…")
+            whisper_result = transcribe(video_path, whisper_model)
 
         # 2. Local analysis — PySceneDetect + MoviePy
         update_job(job_id, status="analyzing", progress=15,
@@ -611,6 +644,7 @@ def process_video(job_id: str, video_path: str, vibe: str,
                 music_track=music_track,
                 enable_zoom=enable_zoom,
                 enable_captions=enable_captions,
+                caption_style=caption_style,
             )
             if not out:
                 continue
@@ -715,6 +749,8 @@ def process():
     music_track     = request.form.get("music", "none")
     enable_captions = request.form.get("captions", "true").lower() == "true"
     enable_zoom     = request.form.get("zoom", "true").lower() == "true"
+    caption_style   = request.form.get("caption_style", "karaoke")
+    whisper_model   = request.form.get("whisper_model", "small")
 
     existing_path = request.form.get("video_path", "").strip()
     if existing_path:
@@ -740,7 +776,8 @@ def process():
     threading.Thread(
         target=process_video,
         args=(job_id, video_path, vibe, preset, music_track,
-              enable_captions, enable_zoom),
+              enable_captions, enable_zoom, False,
+              caption_style, whisper_model),
         daemon=True,
     ).start()
 
