@@ -629,9 +629,7 @@ function showClipError(msg) {
 function resetResultsUI() {
   document.getElementById('clip-error').style.display = 'none';
   document.getElementById('results-section').style.display = 'none';
-  document.getElementById('chat-section').style.display = 'none';
   document.getElementById('clips-list').innerHTML = '';
-  document.getElementById('chat-messages').innerHTML = '';
   if (pollTimer) clearInterval(pollTimer);
 }
 
@@ -655,8 +653,9 @@ function showResults(job, jobId) {
   // Select first clip
   if (clips.length) selectClip(clips[0], 0, jobId);
 
-  // Chat
-  document.getElementById('chat-section').style.display = 'block';
+  // Chat (optional section)
+  const chatEl = document.getElementById('chat-section');
+  if (chatEl) chatEl.style.display = 'block';
 
   // Re-clip button
   document.getElementById('reclip-btn').onclick = () => doReclip(jobId);
