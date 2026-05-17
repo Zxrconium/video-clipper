@@ -94,13 +94,17 @@ Respond with ONLY the JSON array, no other text.
         )
 
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-4-7",
         max_tokens=1000,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = response.content[0].text.strip()
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"⚠️  Claude returned non-JSON: {raw[:200]}")
+        return []
 
 
 def export_clip(video_path, start, end, title, index, style="tiktok"):
@@ -113,17 +117,21 @@ def export_clip(video_path, start, end, title, index, style="tiktok"):
     duration = end - start
 
     if style == "tiktok":
-        vf = "crop=ih*9/16:ih,scale=1080:1920"
+        vf = "crop=ih*9/16:ih,scale=1080:1920:flags=lanczos,unsharp=5:5:0.8:3:3:0.4"
     else:
-        vf = "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2"
+        vf = ("scale=1920:1080:force_original_aspect_ratio=decrease:flags=lanczos,"
+              "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,"
+              "unsharp=5:5:0.8:3:3:0.4")
 
     subprocess.run(
         [
             "ffmpeg", "-i", video_path,
             "-ss", str(start), "-t", str(duration),
             "-vf", vf,
-            "-c:v", "libx264", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k",
+            "-c:v", "libx264", "-crf", "17", "-preset", "slow",
+            "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "320k", "-ar", "48000",
+            "-movflags", "+faststart",
             out, "-y",
         ],
         capture_output=True,
