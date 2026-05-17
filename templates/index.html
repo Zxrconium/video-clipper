@@ -927,16 +927,19 @@ async function processBatch() {
           headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({url: item.url, options: opts}),
         });
-        jobId = (await r.json()).job_id;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'Request failed');
+        jobId = d.job_id;
       } else {
         const form = new FormData();
         if (item.file) form.append('video', item.file);
         else form.append('video_path', item.path);
         Object.entries(opts).forEach(([k, v]) => form.append(k, v));
         const r = await fetch('/process', {method: 'POST', body: form});
-        jobId = (await r.json()).job_id;
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || 'Request failed');
+        jobId = d.job_id;
       }
-      // Wait for job to complete
       await waitForJob(jobId);
       batchQueue[i].status = '✓ done';
     } catch(e) {
@@ -1023,9 +1026,9 @@ function showDlError(msg) {
 
 function showDlSuccess(filename, filepath) {
   const el = document.getElementById('dl-success');
-  el.innerHTML = `✓ Downloaded: <strong>${filename}</strong><br>
-    <button class="btn-primary" style="margin-top:10px"
-      onclick="switchTo('clip')">Clip this video →</button>`;
+  el.innerHTML = '✓ Downloaded: <strong id="dl-fname"></strong><br>' +
+    '<button class="btn-primary" style="margin-top:10px" onclick="switchTo(\'clip\')">Clip this video →</button>';
+  document.getElementById('dl-fname').textContent = filename;
   el.style.display = 'block';
 }
 

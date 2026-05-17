@@ -94,13 +94,17 @@ Respond with ONLY the JSON array, no other text.
         )
 
     response = client.messages.create(
-        model="claude-opus-4-5",
+        model="claude-opus-4-7",
         max_tokens=1000,
         messages=[{"role": "user", "content": content}],
     )
 
     raw = response.content[0].text.strip()
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"⚠️  Claude returned non-JSON: {raw[:200]}")
+        return []
 
 
 def export_clip(video_path, start, end, title, index, style="tiktok"):

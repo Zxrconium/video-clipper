@@ -366,7 +366,10 @@ def get_video_duration(video_path: str) -> float:
         "ffprobe", "-v", "error", "-show_entries", "format=duration",
         "-of", "json", video_path,
     ], capture_output=True, text=True)
-    return float(json.loads(r.stdout)["format"]["duration"])
+    try:
+        return float(json.loads(r.stdout)["format"]["duration"])
+    except (json.JSONDecodeError, KeyError, ValueError) as e:
+        raise ValueError(f"Could not read duration from {video_path}: {e}") from e
 
 
 def update_job(job_id: str, **kwargs):
@@ -884,9 +887,12 @@ def reclip(job_id: str):
 def trim():
     data      = request.get_json(silent=True) or {}
     job_id    = data.get("job_id", "")
-    clip_idx  = int(data.get("clip_index", 0))
-    new_start = float(data.get("start", 0))
-    new_end   = float(data.get("end", 10))
+    try:
+        clip_idx  = int(data.get("clip_index", 0))
+        new_start = float(data.get("start", 0))
+        new_end   = float(data.get("end", 10))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid clip_index, start, or end"}), 400
 
     job = jobs.get(job_id)
     if not job:
@@ -951,10 +957,14 @@ def serve_original(job_id: str):
 def list_uploads():
     exts  = {".mp4", ".mov", ".mkv", ".avi", ".webm"}
     files = []
+    upload_root = UPLOAD_DIR.resolve()
     for f in sorted(UPLOAD_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True):
-        if f.suffix.lower() in exts:
-            files.append({"name": f.name, "path": str(f),
-                          "size_mb": round(f.stat().st_size / 1024 / 1024, 1)})
+        if f.suffix.lower() not in exts:
+            continue
+        if not f.resolve().is_relative_to(upload_root):
+            continue  # skip symlinks pointing outside uploads/
+        files.append({"name": f.name, "path": str(f),
+                      "size_mb": round(f.stat().st_size / 1024 / 1024, 1)})
     return jsonify(files)
 
 
