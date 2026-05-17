@@ -167,6 +167,12 @@ input:checked+.slider:before{transform:translateX(16px)}
 .clip-card:hover,.clip-card.active{border-color:var(--purple)}
 .clip-row1{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .clip-num{width:24px;height:24px;background:var(--border2);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:.72rem;font-weight:700;color:var(--muted);flex-shrink:0}
+.rank-badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:99px;font-size:.72rem;font-weight:800;letter-spacing:.03em;flex-shrink:0}
+.rank-1{background:rgba(250,200,0,.18);color:#fcd34d;border:1px solid rgba(250,200,0,.35)}
+.rank-2{background:rgba(180,180,200,.14);color:#cbd5e1;border:1px solid rgba(180,180,200,.3)}
+.rank-3{background:rgba(200,120,50,.14);color:#fdba74;border:1px solid rgba(200,120,50,.3)}
+.rank-other{background:var(--border);color:var(--muted);border:1px solid var(--border2)}
+.rank-reason{font-size:.74rem;color:var(--muted);margin-bottom:7px;line-height:1.4;font-style:italic}
 .clip-title{font-size:.9rem;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .clip-time{font-size:.74rem;color:var(--purple);font-variant-numeric:tabular-nums;white-space:nowrap}
 .viral-score{display:flex;align-items:center;gap:6px;margin-bottom:8px}
@@ -309,6 +315,16 @@ button.retrim-btn:hover{background:var(--border2)}
 
     <!-- RIGHT: options -->
     <div class="options-card card">
+      <div class="field">
+        <label class="field-label">Max clips</label>
+        <select id="max-clips-select">
+          <option value="3">3 clips</option>
+          <option value="5">5 clips</option>
+          <option value="6">6 clips</option>
+          <option value="8">8 clips</option>
+          <option value="10" selected>10 clips (top 10)</option>
+        </select>
+      </div>
       <div class="field">
         <label class="field-label">Vibe <span style="font-weight:400;color:var(--muted2)">(weights audio vs. cuts)</span></label>
         <select id="vibe-select">
@@ -606,6 +622,7 @@ function gatherOptions() {
     zoom:          document.getElementById('tog-zoom').checked,
     caption_style: document.getElementById('caption-style-select').value,
     whisper_model: document.getElementById('whisper-model-select').value,
+    max_clips:     document.getElementById('max-clips-select').value,
   };
 }
 
@@ -663,7 +680,7 @@ function showResults(job, jobId) {
   const clips = job.clips || [];
   document.getElementById('results-section').style.display = 'block';
   document.getElementById('results-heading').textContent =
-    `✂️ ${clips.length} clip${clips.length !== 1 ? 's' : ''} exported`;
+    `✂️ ${clips.length} clip${clips.length !== 1 ? 's' : ''} — ranked by viral score`;
 
   // Original video
   origVideo.src = `/original/${jobId}`;
@@ -697,13 +714,17 @@ function renderClipCard(clip, i, jobId, container) {
     `<span class="tag tag-${t}">${t}</span>`
   ).join('');
 
-  const vs = clip.viral_score ?? 0;
+  const vs   = clip.viral_score ?? 0;
+  const rank = clip.rank ?? (i + 1);
+  const rankMedal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `#${rank}`;
+  const rankCls   = rank <= 3 ? `rank-${rank}` : 'rank-other';
   div.innerHTML = `
     <div class="clip-row1">
-      <div class="clip-num">${i + 1}</div>
+      <div class="rank-badge ${rankCls}">${rankMedal}</div>
       <div class="clip-title">${clip.title.replace(/_/g, ' ')}</div>
       <div class="clip-time">${fmtTime(clip.start)} → ${fmtTime(clip.end)}</div>
     </div>
+    ${clip.rank_reason ? `<div class="rank-reason">📊 ${clip.rank_reason}</div>` : ''}
     <div class="viral-score">
       <span class="vs-label">⚡ Viral score</span>
       <div class="vs-bar"><div class="vs-fill" style="width:${vs}%"></div></div>

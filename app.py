@@ -229,7 +229,7 @@ def _auto_reason(audio_mean: float, cuts_in_clip: int,
 
 
 def find_moments_local(video_path: str, vibe: str, job_id: str,
-                       alt_pass: bool = False) -> list[dict]:
+                       alt_pass: bool = False, max_clips: int = 10) -> list[dict]:
     """
     Pure-local clip finder using PySceneDetect + MoviePy.
     No internet or API key required.
@@ -304,10 +304,10 @@ def find_moments_local(video_path: str, vibe: str, job_id: str,
                 break
         return out
 
-    selected = _pick_peaks(min_gap, 6)
-    # Fallback: halve the gap to get at least 3 clips
+    selected = _pick_peaks(min_gap, max_clips)
+    # Fallback: halve the gap if we found fewer than 3 clips
     if len(selected) < 3 and duration > 30:
-        selected = _pick_peaks(max(1, min_gap // 2), 6)
+        selected = _pick_peaks(max(1, min_gap // 2), max_clips)
 
     # ── 5. Build clip windows ────────────────────────────────────────────
     moments: list[dict] = []
@@ -352,6 +352,21 @@ def find_moments_local(video_path: str, vibe: str, job_id: str,
             "tags":        _auto_tags(clip_audio, cuts_in, clip_dur, peak_score),
             "viral_score": round(peak_score * 100, 1),
         })
+
+    # Assign rank by viral_score (1 = best) and add a human reason
+    for rank_idx, m in enumerate(
+        sorted(moments, key=lambda x: x["viral_score"], reverse=True)
+    ):
+        m["rank"] = rank_idx + 1
+        score = m["viral_score"]
+        if rank_idx == 0:
+            m["rank_reason"] = f"Highest energy in the video ({score}/100) — best viral candidate"
+        elif rank_idx == 1:
+            m["rank_reason"] = f"Second-highest energy burst ({score}/100) — strong hook potential"
+        elif rank_idx == 2:
+            m["rank_reason"] = f"Third-best moment ({score}/100) — solid watch-through bait"
+        else:
+            m["rank_reason"] = f"Ranked #{rank_idx + 1} of {len(moments)} by combined audio + scene energy ({score}/100)"
 
     moments.sort(key=lambda m: m["start"])
     return moments
@@ -607,7 +622,8 @@ def process_video(job_id: str, video_path: str, vibe: str,
                   enable_captions: bool, enable_zoom: bool,
                   alt_pass: bool = False,
                   caption_style: str = "karaoke",
-                  whisper_model: str = "small"):
+                  whisper_model: str = "small",
+                  max_clips: int = 10):
     try:
         # 1. Transcribe (Whisper — free/local, used only for captions)
         whisper_result = None
@@ -619,7 +635,7 @@ def process_video(job_id: str, video_path: str, vibe: str,
         # 2. Local analysis — PySceneDetect + MoviePy
         update_job(job_id, status="analyzing", progress=15,
                    message="Starting local video analysis…")
-        moments = find_moments_local(video_path, vibe, job_id, alt_pass=alt_pass)
+        moments = find_moments_local(video_path, vibe, job_id, alt_pass=alt_pass, max_clips=max_clips)
 
         if not moments:
             update_job(job_id, status="error", progress=0,
@@ -660,6 +676,8 @@ def process_video(job_id: str, video_path: str, vibe: str,
                 "start":        float(m["start"]),
                 "end":          float(m["end"]),
                 "peak_moment":  float(m["peak_moment"]),
+                "rank":         m.get("rank", i + 1),
+                "rank_reason":  m.get("rank_reason", ""),
                 "download_url": f"/clips/{job_id}/{Path(out).name}",
                 "preview_url":  f"/preview/{job_id}/{Path(out).name}",
             })
@@ -754,6 +772,10 @@ def process():
     enable_zoom     = request.form.get("zoom", "true").lower() == "true"
     caption_style   = request.form.get("caption_style", "karaoke")
     whisper_model   = request.form.get("whisper_model", "small")
+    try:
+        max_clips = max(1, min(10, int(request.form.get("max_clips", 10))))
+    except (ValueError, TypeError):
+        max_clips = 10
 
     existing_path = request.form.get("video_path", "").strip()
     if existing_path:
@@ -780,7 +802,7 @@ def process():
         target=process_video,
         args=(job_id, video_path, vibe, preset, music_track,
               enable_captions, enable_zoom, False,
-              caption_style, whisper_model),
+              caption_style, whisper_model, max_clips),
         daemon=True,
     ).start()
 
